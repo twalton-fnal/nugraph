@@ -22,7 +22,6 @@ from ..util import PositionFeatures, FeatureNormMetric, FeatureNorm, Hierarchica
 DEFAULT_DATA = ("$NUGRAPH_DATA/uboone-opendata/"
                 "uboone-opendata-19be46d89d0f22f5a78641d724c1fedd.gnn.h5")
 
-
 class NuGraphDataModule(LightningDataModule):
     """PyTorch Lightning data module for neutrino graph data."""
     def __init__(self,
@@ -44,7 +43,7 @@ class NuGraphDataModule(LightningDataModule):
             data_source_path = DEFAULT_DATA
         self.source_filename = os.path.expandvars(data_source_path)
         self.target_filename = None if not data_target_path else os.path.expandvars(data_target_path)
-
+      
         self.batch_size = batch_size
         self.num_workers = num_workers
         if shuffle not in ("random", "balance"):
@@ -54,8 +53,6 @@ class NuGraphDataModule(LightningDataModule):
         self.balance_frac = balance_frac
 
         transform = None
-        train_datasets = val_datasets = test_datasets = norms = []
-        
         filenames = [ self.source_filename, self.target_filename ]
         for file_index, filename in enumerate(filenames):
 
@@ -107,35 +104,42 @@ class NuGraphDataModule(LightningDataModule):
                      print(("Data size array not found in file! "
                             "Call \"generate_samples\" to create it."))
                      sys.exit()
-
                 
                  # load feature normalizations
                  try:
                      norm = {}
                      for p in self.planes:
                          norm[p] = tensor(f[f'norm/{p}'][()])
-                     norms.append( norm )
                  except KeyError:
                      print(("Feature normalisations not found in file! "
                             "Call \"generate_norm\" to create them."))
-                     sys.exit()
+                     sys.exit()             
 
-            if file_index == 0:  
-               if model:
-                    transform = model.transform(self.planes)
-               else:
-                    transform = Compose((PositionFeatures(self.planes),
-                                         FeatureNorm(self.planes, norms[file_index]),
-                                         HierarchicalEdges(self.planes),
-                                         EventLabels()))
+            if not self.target_filename:
+                transform = model.transform(self.planes) if model else None
+            else:
+                transform = Compose((PositionFeatures(self.planes),
+                                     FeatureNorm(self.planes,norm),
+                                     HierarchicalEdges(self.planes),
+                                     EventLabels()))
+                                   
+            if file_index == 0 :
+               self.source_transform = transform
+            else:
+               self.target_transform = transform
             
-            self.train_dataset = NuGraphDataset(filename, train_samples, transform)
-            self.val_dataset   = NuGraphDataset(filename, val_samples, transform)
-            self.test_dataset  = NuGraphDataset(filename, test_samples, transform)
+            train_dataset = NuGraphDataset(filename, train_samples, self.source_transform )
+            val_dataset   = NuGraphDataset(filename, val_samples, self.source_transform)
+            test_dataset  = NuGraphDataset(filename, test_samples, self.source_transform)
 
-            train_datasets.append( self.train_dataset )
-            val_datasets.append( self.val_dataset )
-            test_datasets.append( self.test_dataset )
+            if file_index == 0:
+               self.train_dataset = train_dataset
+               self.val_dataset   = val_dataset
+               self.test_dataset  = test_dataset
+            elif file_index == 1:
+               self.train_dataset_target = train_dataset
+               self.val_dataset_target   = val_dataset
+               self.test_dataset_target  = test_dataset
 
         """
         Carry out the procedure for combining the input source and target datasets.
@@ -143,10 +147,9 @@ class NuGraphDataModule(LightningDataModule):
                It cycles through the smaller dataset until the larger dataset is loaded.
         """
         if self.target_filename:
-           self.combined_train = NuGraphCombinedDataset(train_datasets[0],train_datasets[1])
-           self.combined_val   = NuGraphCombinedDataset(val_datasets[0],train_datasets[1])
-           self.combined_test  = NuGraphCombinedDataset(test_datasets[0],train_datasets[1])
-    
+           self.combined_train = NuGraphCombinedDataset(self.train_dataset, self.train_dataset_target)
+           self.combined_val   = NuGraphCombinedDataset(self.val_dataset, self.train_dataset_target)
+           self.combined_test  = NuGraphCombinedDataset(self.test_dataset, self.train_dataset_target)
 
     @staticmethod
     def generate_samples(data_path: str):
@@ -216,7 +219,6 @@ class NuGraphDataModule(LightningDataModule):
                     del f[key]
                 f[key] = metrics[p].compute()
 
-
     @staticmethod
     def collate_func(batch):
         """
@@ -237,8 +239,7 @@ class NuGraphDataModule(LightningDataModule):
         batchB = Batch.from_data_list(dataB_list)  # Batch data from datasetB
         return batchA, batchB
     
-    
-    def train_dataloader(self) -> DataLoader:
+    def train_dataloader(self) -> DataLoader:      
         if not self.target_filename:
            if self.shuffle == 'balance':
               shuffle = False
@@ -249,41 +250,43 @@ class NuGraphDataModule(LightningDataModule):
            else:
               shuffle = True
               sampler = None
-
-           return DataLoader(self.train_dataset,
-                             batch_size=self.batch_size,
-                             num_workers=self.num_workers,
-                             sampler=sampler, drop_last=True,
-                             shuffle=shuffle, pin_memory=True)
+            
+           dataloader_train = DataLoader(self.train_dataset,
+                                batch_size=self.batch_size,
+                                num_workers=self.num_workers,
+                                sampler=sampler, drop_last=True,
+                                shuffle=shuffle, pin_memory=True)
         else:
-            return DataLoader(self.combined_train,
-                              batch_size=self.batch_size, drop_last=True, 
-                              shuffle=True, collate_fn=self.collate_func, pin_memory=True) 
-
+            dataloader_train = DataLoader(self.combined_train,
+                                  batch_size=self.batch_size, drop_last=True, 
+                                  shuffle=True, collate_fn=self.collate_func, pin_memory=True) 
+        return dataloader_train
+    
     
     def val_dataloader(self) -> DataLoader:
         if not self.target_filename:
-           return DataLoader(self.val_dataset, num_workers=self.num_workers,
-                             batch_size=self.batch_size)
+           dataloader_val = DataLoader(self.val_dataset, num_workers=self.num_workers,
+                                    batch_size=self.batch_size)
         else:    
-           return DataLoader(self.combined_val,
-                             batch_size=self.batch_size, collate_fn=self.collate_func) 
+           dataloader_val = DataLoader(self.combined_val,
+                                   batch_size=self.batch_size, collate_fn=self.collate_func,)   
+        return dataloader_val    
 
     
     def test_dataloader(self) -> DataLoader:
         if not self.target_filename:
-            return DataLoader(self.test_dataset, num_workers=self.num_workers,
-                              batch_size=self.batch_size)
+           dataloader_test = DataLoader(self.test_dataset, num_workers=self.num_workers,
+                                 batch_size=self.batch_size)
         else:
-            return DataLoader(self.combined_test,
-                               batch_size=self.batch_size, collate_fn=self.collate_func)
-
+           dataloader_test = DataLoader(self.combined_test,
+                                  batch_size=self.batch_size, collate_fn=self.collate_func,)
+        return dataloader_test
             
     
     @staticmethod
     def add_data_args(parser: ArgumentParser) -> ArgumentParser:
         data = parser.add_argument_group('data', 'Data module configuration')
-        data.add_argument('--data-source-path', type=str, default="auto",
+        data.add_argument('--data-source-path', dest='data-source-path', type=str, default="auto",
                           help='Location of the input source data file')
         data.add_argument('--data-target-path', type=str, default=None,
                           help='Location of the input target data file')

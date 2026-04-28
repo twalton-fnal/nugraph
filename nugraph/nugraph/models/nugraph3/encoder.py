@@ -2,6 +2,7 @@
 import torch
 from pynuml.data import NuGraphData
 from ...util import InputNorm
+from .types import Data
 
 class Encoder(torch.nn.Module):
     """
@@ -12,13 +13,16 @@ class Encoder(torch.nn.Module):
         planar_features: Number of planar node features
         nexus_feature: Number of nexus node features
         interaction_features: Number of interaction node features
+        instance_features: 
+        planes: Tuple of planes
     """
     def __init__(self,
                  in_features: int,
                  planar_features: int,
                  nexus_features: int,
                  interaction_features: int,
-                 instance_features: int):
+                 instance_features: int = 0,
+                 planes: tuple[str] = None):
         super().__init__()
 
         self.input_norm = InputNorm(in_features)
@@ -38,21 +42,34 @@ class Encoder(torch.nn.Module):
 
         self.nexus_features = nexus_features
         self.interaction_features = interaction_features
+        self.planes = planes
 
-    def forward(self, data: NuGraphData) -> None:
+    def forward(self, data: Data) -> None:
         """
         NuGraph3 encoder forward pass
         
         Args:
             data: Graph data object
         """
-        x_in = self.input_norm(data["hit"].x)
-        data["hit"].x = self.planar_net(x_in)
-        data["hit"].of = self.beta_net(x_in)
-        data["hit"].ox = self.coord_net(x_in)
-        data["sp"].x = torch.zeros(data["sp"].num_nodes,
-                                   self.nexus_features,
-                                   device=data["hit"].x.device)
-        data["evt"].x = torch.zeros(data["evt"].num_nodes,
-                                    self.interaction_features,
-                                    device=data["hit"].x.device)
+        if self.planes == None :
+           x_in = self.input_norm(data["hit"].x)
+           data["hit"].x = self.planar_net(x_in)
+           data["hit"].of = self.beta_net(x_in)
+           data["hit"].ox = self.coord_net(x_in)
+           data["sp"].x = torch.zeros(data["sp"].num_nodes,
+                                      self.nexus_features,
+                                      device=data["hit"].x.device)
+           data["evt"].x = torch.zeros(data["evt"].num_nodes,
+                                       self.interaction_features,
+                                       device=data["hit"].x.device)
+        else:  
+           for p in self.planes:
+               data[p].x = self.planar_net(data[p].x)
+               device = data[p].x.device
+           data["sp"].x = torch.zeros(data["sp"].num_nodes,
+                                      self.nexus_features,
+                                      device=device)
+           data["evt"].x = torch.zeros(data["evt"].num_nodes,
+                                       self.interaction_features,
+                                       device=device)
+      

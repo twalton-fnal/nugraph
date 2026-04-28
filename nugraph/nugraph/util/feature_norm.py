@@ -31,11 +31,11 @@ class FeatureNormMetric(Metric):
 class FeatureNorm(BaseTransform):
     """Normalise 2D graph node features."""
     def __init__(self, planes: list[str], norm: dict[str, torch.Tensor]):
-        super(FeatureNorm, self).__init__()
+        super().__init__() 
         self.norm = norm
         self.planes = planes
 
-    def __call__(self, data: HeteroData) -> HeteroData:
+    def forward(self, data: HeteroData) -> HeteroData: 
         for p in self.planes:
             mean, std = self.norm[p]
             data[p].x = (data[p].x - mean[None,:]) / std[None,:]

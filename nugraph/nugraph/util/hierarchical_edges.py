@@ -15,12 +15,11 @@ class HierarchicalEdges(BaseTransform):
         super().__init__()
         self.planes = planes
 
-    def __call__(self, data: HeteroData) -> HeteroData:
-
+    def forward(self, data: HeteroData) -> HeteroData:
         # no-op if the graph data is already structured how we want
         if "hit" in data.node_types:
             return data
-
+        """
         # unify planar edges
         edge_plane = []
         edge_nexus = []
@@ -73,4 +72,19 @@ class HierarchicalEdges(BaseTransform):
         hi = torch.zeros(data["sp"].num_nodes, dtype=torch.long)
         data["sp", "in", "evt"].edge_index = torch.stack((lo, hi), dim=0)
 
+        """
+        
+        # add edges to and from event node
+        data["evt"].num_nodes = 1
+        for p in self.planes + ["sp"]:
+            lo = torch.arange(data[p].num_nodes, dtype=torch.long)
+            hi = torch.zeros(data[p].num_nodes, dtype=torch.long)
+            data[p, "in", "evt"].edge_index = torch.stack((lo, hi), dim=0)
+            data["evt", "owns", p].edge_index = torch.stack((hi, lo), dim=0)
+
+        # add edges from nexus to plane
+        for p in self.planes:
+            lo, hi = data[p, "nexus", "sp"].edge_index
+            data["sp", "nexus", p].edge_index = torch.stack((hi, lo), dim=0)
+        
         return data

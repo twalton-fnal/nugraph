@@ -2,6 +2,7 @@
 from typing import Callable, Optional
 import h5py
 from torch_geometric.data import Dataset
+from torch_geometric.data import HeteroData
 
 from pynuml.data import NuGraphData
 
@@ -27,8 +28,7 @@ class NuGraphDataset(Dataset):
     def get(self, idx: int) -> NuGraphData:
         key = f"/dataset/{self.samples[idx]}"
         return NuGraphData.load(self.file[key])
-
-
+        
 class NuGraphCombinedDataset(Dataset):
     """
     A dataset that pairs two datasets together and returns corresponding items.
