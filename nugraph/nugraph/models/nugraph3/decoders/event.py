@@ -112,7 +112,7 @@ class EventDecoder(nn.Module):
            x_target = self.net(target_data["evt"].x)
            y_target = target_data["evt"].y
            w_target = 2 * (-1 * self.target_temp).exp()  # SHOULD TARGET HAVE ITS OWN WEIGHT?
-           loss_source = w_target * self.loss(x_target, y_target) + self.target_temp           
+           loss_target = w_target * self.loss(x_target, y_target) + self.target_temp           
 
         """
            Domain Adaptation is implemented via the Domain-Adversarial Neural Network (DANN). 
