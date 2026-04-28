@@ -85,7 +85,9 @@ class NuGraph3(LightningModule):
         self.lr = lr
         self.warmup_epochs = warmup_epochs
         self.da_loss_fnc_name = da_loss_fnc_name
+        self.domain_adaptation_classes = [ "dann", "mmd", "semantic", "sinkhorn" ]
 
+        # encoder followed by calling nugraphCore
         if da_loss_fnc_name == None:
            self.encoder  = Encoder(in_features, hit_features, nexus_features, interaction_features, 
                                    instance_features=instance_features)
@@ -98,13 +100,18 @@ class NuGraph3(LightningModule):
                                        planes=planes, use_checkpointing=use_checkpointing)
         self.decoders = []
 
+        # decoder functionalities
         if event_head:
             self.event_decoder = EventDecoder(interaction_features, event_classes, 
-                                              da_loss_fnc_name, warmup_epochs)
+                                              da_loss_fnc_name=self.da_loss_fnc_name, 
+                                              warmup_epochs=self.warmup_epochs)
             self.decoders.append(self.event_decoder)
 
         if semantic_head:
-            self.semantic_decoder = SemanticDecoder(hit_features, semantic_classes)
+            self.semantic_decoder = SemanticDecoder(hit_features, semantic_classes, 
+                                                    planes=self.planes,
+                                                    da_loss_fnc_name=self.da_loss_fnc_name, 
+                                                    warmup_epochs=self.warmup_epochs)
             self.decoders.append(self.semantic_decoder)
 
         if filter_head:
@@ -145,18 +152,18 @@ class NuGraph3(LightningModule):
         
         # Check if the input is a list of two batches
         batchA = data
-        
-        if self.da_loss_fnc_name == "dann":
-            if isinstance(data, list) and len(data) == 2:
-               batchA, batchB = data
-            else:
-               raise ValueError("Expected input data to be a list of two batches.")
+
+        if self.da_loss_fnc_name in self.domain_adaptation_classes:
+           if isinstance(data, list) and len(data) == 2:
+              batchA, batchB = data
+           else:
+              raise ValueError("Expected input data to be a list of two batches.")
         
         self.encoder(batchA)
         for _ in range(self.num_iters):
             self.core_net(batchA)
 
-        if self.da_loss_fnc_name == "dann":
+        if self.da_loss_fnc_name in self.domain_adaptation_classes:
            self.encoder(batchB)
            for _ in range(self.num_iters):
                self.core_net(batchB)
@@ -165,15 +172,14 @@ class NuGraph3(LightningModule):
         total_metrics = {}
 
         # calculate the loss and metrics
-        if self.da_loss_fnc_name == None:
+        if not self.da_loss_fnc_name in self.domain_adaptation_classes:
            for decoder in self.decoders:
                loss, metrics = decoder(batchA, stage)
                total_loss += loss
                total_metrics.update(metrics)
-               
-        elif self.da_loss_fnc_name == "dann":
+        else: 
             for decoder in self.decoders:
-                if decoder == self.event_decoder: 
+                if decoder in [self.event_decoder, self.semantic_decoder]: 
                    loss, metrics = decoder(data=[batchA, batchB], stage=stage)
                 else:
                     loss, metrics = decoder(data=batchA, stage=stage)
@@ -211,28 +217,22 @@ class NuGraph3(LightningModule):
         else:     
            epoch = self.trainer.current_epoch
 
-           """ Check and toggle DA for event_decoder """
-           if hasattr(self, "event_decoder") and hasattr(self.event_decoder, "use_domain_adaptation"):
-               if epoch >= getattr(self.event_decoder, "warmup_epochs", 0):
-                   if not self.event_decoder.use_domain_adaptation:
-                       print(f"[Epoch {epoch}] Enabling DA for event_decoder")
-                   self.event_decoder.use_domain_adaptation = True 
-               else:
-                  print(f"[Epoch {epoch}] DA is OFF for event_decoder (warmup phase)")
-
-           """
-           Check and toggle DA for semantic_decoder
-           if hasattr(self, "semantic_decoder") and hasattr(self.semantic_decoder, "use_domain_adaptation"):
-               if epoch >= getattr(self.semantic_decoder, "warmup_epochs", 0):
-                   if self.semantic_decoder.use_domain_adaptation is False:
-                      print(f"[Epoch {epoch}] DA is manually disabled for semantic_decoder — will not enable DA")
-                   else:
-                      print(f"[Epoch {epoch}] Enabling DA for semantic_decoder")
-                      self.semantic_decoder.use_domain_adaptation = True
-               else:
-                  print(f"[Epoch {epoch}] DA is OFF for semantic_decoder (warmup phase)")
-           """
-
+           """ Check and toggle DA for event_decoder and semantic_decoder"""
+           for n in range(0,2): 
+               name    = "event_decoder" if n == 0 else "semantic_decoder"
+               decoder = self.event_decoder if n == 0 else self.semantic_decoder
+               use_da  = self.event_decoder.use_domain_adaptation if n == 0 else self.semantic_decoder.use_domain_adaptation
+               if hasattr(self,name) and hasattr(decoder, "use_domain_adaptation"):
+                  if epoch >= getattr(decoder, "warmup_epochs", 0):
+                     if not use_da: 
+                        print(f"[Epoch {epoch}] Enabling DA for {name}")
+                     else:
+                        print(f"[Epoch {epoch}] Enabling DA for {name}")
+                        if n == 0 : self.event_decoder.use_domain_adaptation = True
+                        elif n == 0 : self.semantic_decoder.use_domain_adaptation = True
+                  else:
+                     print(f"[Epoch {epoch}] DA is OFF for {name} (warmup phase)")
+            
     def on_train_epoch_end(self) -> None:
         if self.da_loss_fnc_name == None:
            # stop updating running average for feature norm

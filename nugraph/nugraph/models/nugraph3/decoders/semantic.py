@@ -1,35 +1,62 @@
 """NuGraph3 semantic decoder"""
 from typing import Any
 import tempfile
+import matplotlib.pyplot as plt
+import seaborn as sn
+
 import torch
-from torch import nn
 import torchmetrics as tm
+from torch import nn
 from torch_geometric.data import Batch
-from pytorch_lightning.loggers import Logger
+from pytorch_lightning.loggers import Logger, TensorBoardLogger
+
 from ....util import ConfusionMatrixLogger, RecallLoss
+from ....util.DANNLoss import ReverseLayerF
+from ....util.EmbeddingPlotter import CombinedEmbeddingPlot
 from ..types import Data
 
 class SemanticDecoder(nn.Module):
     """
     NuGraph3 semantic decoder module
 
-    Convolve planar node embedding down to a set of categorical scores for
+    Convolve the planar node embedding down to a set of categorical scores for
     each semantic class.
+
+    Includes the following:
+       Domain Adversarial Neural Network (DANN) loss on planar node embedding 
+       to align them across the source and target datasets and improve classification. 
 
     Args:
         hit_features: Number of planar hit node features
         semantic_classes: List of semantic classes
+        planes: List of detector planes
+        
     """
     def __init__(self,
                  hit_features: int,
-                 semantic_classes: list[str]):
+                 semantic_classes: list[str],
+                 planes: list[str] = None,
+                 da_loss_fnc_name: str = None,
+                 warmup_epochs: int = 0):
         super().__init__()
 
+        self.semantic_classes = semantic_classes
+        self.warmup_epochs = warmup_epochs
+        self.da_loss_fnc_name = da_loss_fnc_name
+        self.use_domain_adaptation = False 
+        self.domain_adaptation_classes = [ "dann", "mmd", "semantic", "sinkhorn" ]
+        
         # loss function
         self.loss = RecallLoss()
+        if self.da_loss_fnc_name == "dann":
+           self.loss_dann = nn.CrossEntropyLoss()  
+           loss_dann = torch.tensor(0.0)    
 
         # temperature parameter
-        self.temp = nn.Parameter(torch.tensor(0.))
+        self.source_temp = nn.Parameter(torch.tensor(0.))
+        if self.da_loss_fnc_name in self.domain_adaptation_classes: 
+           self.target_temp = nn.Parameter(torch.tensor(0.))
+           self.da_temp = nn.Parameter(torch.tensor(0.))
 
         # metrics
         metric_args = {
@@ -37,57 +64,203 @@ class SemanticDecoder(nn.Module):
             "num_classes": len(semantic_classes),
             "ignore_index": -1
         }
-        self.recall = tm.Recall(**metric_args)
-        self.precision = tm.Precision(**metric_args)
+        
+        self.source_recall = tm.Recall(**metric_args)
+        self.source_precision = tm.Precision(**metric_args)
+        self.source_cm_recall = tm.ConfusionMatrix(normalize="true", **metric_args)
+        self.source_cm_precision = tm.ConfusionMatrix(normalize="pred", **metric_args)
         self.cm_logger = ConfusionMatrixLogger(semantic_classes)
-        self.cm_recall = tm.ConfusionMatrix(normalize="true", **metric_args)
-        self.cm_precision = tm.ConfusionMatrix(normalize="pred", **metric_args)
+
+        if self.da_loss_fnc_name in self.domain_adaptation_classes:
+           self.target_recall = tm.Recall(**metric_args)
+           self.target_precision = tm.Precision(**metric_args)
+           self.target_cm_recall = tm.ConfusionMatrix(normalize="true", **metric_args)
+           self.target_cm_precision = tm.ConfusionMatrix(normalize="pred", **metric_args)
+           self.embeddings = CombinedEmbeddingPlot(method="umap")
 
         # network
-        self.net = nn.Linear(hit_features, len(semantic_classes))
-
+        if self.da_loss_fnc_name in self.domain_adaptation_classes:
+           self.net = self.net = nn.ModuleDict()
+           for p in planes:
+               self.net[p] = nn.Linear(hit_features, len(semantic_classes))
+        else:
+           self.net = nn.Linear(hit_features, len(semantic_classes))
+            
         self.classes = semantic_classes
 
-    def forward(self, data: Data, stage: str = None) -> dict[str, Any]:
+        # Domain classifier network for DANN
+        if self.da_loss_fnc_name == "dann":
+           self.domain_net = nn.Linear(in_features=hit_features,
+                                       out_features=2)
+           self.domain_classes = ['source', 'target']
+
+    
+    def forward(self, data: list[Data], stage: str = None) -> dict[str, Any]:
         """
         NuGraph3 semantic decoder forward pass
 
         Args:
-            data: Graph data object
+            data: Graph data object or both the source and target data objects
             stage: Stage name (train/val/test)
         """
 
-        # run network and add output to graph object
-        data["hit"].x_semantic = self.net(data["hit"].x)
-        if isinstance(data, Batch):
-            # pylint: disable=protected-access
-            data._slice_dict["hit"]["x_semantic"] = data["hit"].ptr
-            inc = torch.zeros(data.num_graphs, device=data["hit"].x.device)
-            data._inc_dict["hit"]["x_semantic"] = inc
+        # the data
+        if not self.da_loss_fnc_name in self.domain_adaptation_classes:
+           source_data = data
+        else:
+           source_data, target_data = data 
+            
+        # run network and add output to graph object       
+        def _run_net_and_add_output(data: Any, net: torch.nn.Module, key: str):
+            data[key].x_semantic = net(data[key].x)
+            if isinstance(data, Batch):
+               data._slice_dict[key]["x_semantic"] = data[key].ptr
+               inc = torch.zeros(data.num_graphs, device=data[key].x.device)
+               data._inc_dict[key]["x_semantic"] = inc
+
+        if self.da_loss_fnc_name in self.domain_adaptation_classes:
+           for p, net in self.net.items():
+               _run_net_and_add_output(source_data, net, p)
+               _run_net_and_add_output(target_data, net, p)
+        else :
+           _run_net_and_add_output(source_data, self.net, "hit")
 
         # calculate loss
-        x = data["hit"].x_semantic
-        y = data["hit"].y_semantic
-        w = 2 * (-1 * self.temp).exp()
-        loss = w * self.loss(x, y) + self.temp
+        loss = loss_source = loss_target = lossDA = raw_lossDA = 0
+        
+        if not self.da_loss_fnc_name in self.domain_adaptation_classes:
+           source_x = source_data["hit"].x_semantic
+           source_y = source_data["hit"].y_semantic
+           source_w = 2 * (-1 * self.source_temp).exp()
+           loss_source = source_w * self.loss(source_x, source_y) + self.source_temp
+        else:
+            source_x = torch.cat([source_data[p].x_semantic for p in self.net], dim=0)
+            source_y = torch.cat([source_data[p].y_semantic for p in self.net], dim=0)
+            source_w = 2 * (-1 * self.source_temp).exp()
+            loss_source = source_w * self.loss(source_x, source_y) + self.source_temp
+        
+            target_x = torch.cat([target_data[p].x_semantic for p in self.net], dim=0)
+            target_y = torch.cat([target_data[p].y_semantic for p in self.net], dim=0)
+            target_w = 2 * (-1 * self.target_temp).exp()
+            loss_target = target_w * self.loss(target_x, target_y) + self.target_temp
+            
+        if self.da_loss_fnc_name == None:
+           loss = loss_source
 
+        """
+            Domain Adaptation is optional and is implemented via DANN (lossDA). 
+            Both source and target labels are being used to calculate 
+            semantic losses (loss_source and loss_target).
+            All losses are scaled by their own temperatures, which are trainable parameters.
+            DA loss is also capped at most 1/4 of the loss_source (to be on the safe side). 
+        """
+        if self.use_domain_adaptation:
+           # Domain Classification
+           alpha = 1
+           xSS_list, xTT_list = [], []
+
+           for p in self.net:
+               reversed_S = ReverseLayerF.apply(source_data[p].x_semantic, alpha)
+               xSS = self.domain_net(reversed_S)
+               xSS_list.append(xSS)
+        
+               reversed_T = ReverseLayerF.apply(target_data[p].x_semantic, alpha)
+               xTT = self.domain_net(reversed_T)
+               xTT_list.append(xTT)
+
+           #combine all planes, i.e., there is only one adversarial branch for combined semantic features
+           xSS_all = torch.cat(xSS_list, dim=0)  
+           xTT_all = torch.cat(xTT_list, dim=0)
+        
+           ySS = torch.zeros(xSS_all.shape[0], dtype=torch.long, device=xSS_all.device)
+           yTT = torch.ones(xTT_all.shape[0], dtype=torch.long, device=xTT_all.device)
+        
+           combined_image = torch.cat((xSS_all, xTT_all), dim=0)  
+           combined_label = torch.cat((ySS, yTT), dim=0)
+        
+           wDA = 2 * (-1 * self.da_temp).exp()
+           raw_lossDA = wDA * self.loss_dann(combined_image, combined_label) + self.da_temp
+
+           # Smooth capping of the DA based on the source semantic loss value (currently to be at most 1/4 of the event loss value)
+           sharp = 20.0  # sharpness of transition when source semantic loss goes from positive to negative
+           sig = torch.sigmoid(sharp * loss_source)
+           max_lossDA = sig * (loss_source / 4) + (1 - sig) * (4 * loss_source)
+           lossDA = torch.min(raw_lossDA, max_lossDA)
+
+           # Total loss
+           loss = loss_source + loss_target + lossDA
+
+        else:
+            loss = loss_source + loss_target
+            
         # calculate metrics
         metrics = {}
-        if stage:
-            metrics[f"semantic/loss-{stage}"] = loss
-            metrics[f"semantic/recall-{stage}"] = self.recall(x, y)
-            metrics[f"semantic/precision-{stage}"] = self.precision(x, y)
+        if self.da_loss_fnc_name == None:
+           if stage:
+              metrics[f"semantic/loss-{stage}"] = loss
+              metrics[f"semantic/recall-{stage}"] = self.source_recall(source_x, source_y)
+              metrics[f"semantic/precision-{stage}"] = self.source_precision(source_x, source_y)
+        else:
+            if stage:
+               metrics[f"loss_semantic/{stage}"] = loss
+               metrics[f"recall_semantic_source/{stage}"] = self.source_recall(source_x, source_y)
+               metrics[f"precision_semantic_source/{stage}"] = self.source_precision(source_x, source_y)
+               metrics[f"recall_semantic_target/{stage}"] = self.target_recall(target_x, target_y)
+               metrics[f"precision_semantic_target/{stage}"] = self.target_precision(target_x, target_y)
+               metrics[f"loss_semantic_source/{stage}"] = loss_source
+               metrics[f"loss_semantic_target/{stage}"] = loss_target
+                
+               if self.use_domain_adaptation:
+                  metrics[f"DA_loss_capped_semantic/{stage}"] = lossDA
+                  metrics[f"DA_loss_uncapped_semantic/{stage}"] = raw_lossDA 
+            
         if stage == "train":
-            metrics["temperature/semantic"] = self.temp
+           metrics["temperature/semantic"] = self.source_temp
+            
+           if self.da_loss_fnc_name in self.domain_adaptation_classes:
+              metrics["temperature/semantic_target"] = self.target_temp
+              metrics["temperature/semantic_DA"] = self.da_temp
+                
         if stage in ["val", "test"]:
-            self.cm_recall.update(x, y)
-            self.cm_precision.update(x, y)
+           self.source_cm_recall.update(source_x, source_y)
+           self.source_cm_precision.update(source_x, source_y)
+            
+           if self.da_loss_fnc_name in self.domain_adaptation_classes:
+              self.target_cm_recall.update(target_x, target_y)
+              self.target_cm_precision.update(target_x, target_y)
+              self.embeddings.update(source_data[p].x_semantic, source_y, target_data[p].x_semantic, target_y)
 
         # apply softmax to prediction
-        data["hit"].x_semantic = data["hit"].x_semantic.softmax(dim=1)
+        if self.da_loss_fnc_name == None:
+           source_data["hit"].x_semantic = source_data["hit"].x_semantic.softmax(dim=1)
+        else:
+           for p in self.net:
+               source_data[p].x_semantic = source_data[p].x_semantic.softmax(dim=1)
+               target_data[p].x_semantic = target_data[p].x_semantic.softmax(dim=1)
 
         return loss, metrics
 
+
+    def draw_confusion_matrix(self, cm: tm.ConfusionMatrix) -> plt.Figure:
+        """
+        Draw a confusion matrix
+
+        Args:
+            cm: Confusion matrix object
+        """
+        confusion = cm.compute().cpu()
+        fig = plt.figure(figsize=[8,6])
+        sn.heatmap(confusion,
+                   xticklabels=self.classes,
+                   yticklabels=self.classes,
+                   vmin=0, vmax=1,
+                   annot=True)
+        plt.ylim(0, len(self.classes))
+        plt.xlabel("Assigned label")
+        plt.ylabel("True label")
+        return fig
+
+        
     def on_epoch_end(self, logger: Logger | list[Logger], stage: str,
                      epoch: int) -> None: # pylint: disable=unused-argument
         """
@@ -98,8 +271,42 @@ class SemanticDecoder(nn.Module):
             stage: Training stage
             epoch: Training epoch index
         """
-        self.cm_logger.log(f"semantic/recall-matrix-{stage}",
-                           self.cm_recall, logger, epoch)
-        self.cm_logger.log(f"semantic/precision-matrix-{stage}",
-                           self.cm_precision, logger, epoch)
+        
+        if not logger:
+            return
 
+        if self.da_loss_fnc_name == None:
+           self.cm_logger.log(f"semantic/recall-matrix-{stage}",
+                                self.source_cm_recall, logger, epoch)
+           self.cm_logger.log(f"semantic/precision-matrix-{stage}",
+                                self.source_cm_precision, logger, epoch)
+        else:
+           logger.experiment.add_figure(f"recall_semantic_matrix_source/{stage}",
+                                     self.draw_confusion_matrix(self.source_cm_recall),
+                                     global_step=epoch)
+           self.source_cm_recall.reset()
+
+           logger.experiment.add_figure(f"recall_semantic_matrix_target/{stage}",
+                                     self.draw_confusion_matrix(self.target_cm_recall),
+                                     global_step=epoch)
+           self.target_cm_recall.reset()
+
+           logger.experiment.add_figure(f"precision_semantic_matrix_source/{stage}",
+                                self.draw_confusion_matrix(self.source_cm_precision),
+                                global_step=epoch)
+           self.source_cm_precision.reset()
+
+           logger.experiment.add_figure(f"precision_semantic_matrix_target/{stage}",
+                                self.draw_confusion_matrix(self.target_cm_precision),
+                                global_step=epoch)
+           self.target_cm_precision.reset()
+
+           # Plot the embedding space 
+           dat1, lab1, dat2, lab2 = self.embeddings.compute()
+           dat1sub, lab1sub = self.embeddings.subsample(dat1, lab1, max_samples=1000)
+           dat2sub, lab2sub = self.embeddings.subsample(dat2, lab2, max_samples=1000)
+        
+           embeddings_fig = self.embeddings.plot_combined(dat1sub, lab1sub, dat2sub, lab2sub, epoch=epoch, class_names=self.semantic_classes)
+           logger.experiment.add_figure(f"Embeddings semantic/{stage}",
+                                     embeddings_fig, global_step=epoch)
+           self.embeddings.reset()

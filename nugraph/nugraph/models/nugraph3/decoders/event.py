@@ -91,7 +91,7 @@ class EventDecoder(nn.Module):
         """
         
         # the data
-        if self.da_loss_fnc_name == None:
+        if not self.da_loss_fnc_name in self.domain_adaptation_classes:
            source_data = data
         else:
            source_data, target_data = data 
@@ -145,7 +145,9 @@ class EventDecoder(nn.Module):
 
            # Total loss
            loss = loss_source + loss_target + lossDA
-
+        else:
+           loss = loss_source + loss_target
+        
         # calculate metrics
         metrics = {}
         if stage:
