@@ -229,7 +229,7 @@ class NuGraph3(LightningModule):
                      else:
                         print(f"[Epoch {epoch}] Enabling DA for {name}")
                         if n == 0 : self.event_decoder.use_domain_adaptation = True
-                        elif n == 0 : self.semantic_decoder.use_domain_adaptation = True
+                        elif n == 1 : self.semantic_decoder.use_domain_adaptation = True
                   else:
                      print(f"[Epoch {epoch}] DA is OFF for {name} (warmup phase)")
             
