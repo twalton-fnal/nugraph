@@ -172,27 +172,25 @@ class NuGraph3(LightningModule):
         total_metrics = {}
 
         # calculate the loss and metrics
-        if not self.da_loss_fnc_name in self.domain_adaptation_classes:
-           for decoder in self.decoders:
-               loss, metrics = decoder(batchA, stage)
-               total_loss += loss
-               total_metrics.update(metrics)
-        else: 
-            for decoder in self.decoders:
-                if decoder in [self.event_decoder, self.semantic_decoder]: 
-                   loss, metrics = decoder(data=[batchA, batchB], stage=stage)
-                else:
-                    loss, metrics = decoder(data=batchA, stage=stage)
-                total_loss += loss
-                total_metrics.update(metrics)
+        for decoder in self.decoders:
+            if decoder in [self.event_decoder, self.semantic_decoder]: 
+               if not self.da_loss_fnc_name in self.domain_adaptation_classes:
+                  loss, metrics = decoder(data=batchA, stage=stage)
+               else :
+                  loss, metrics = decoder(data=[batchA, batchB], stage=stage)
+            else:
+               loss, metrics = decoder(data=batchA, stage=stage)
+            total_loss += loss
+            total_metrics.update(metrics)
 
-            if hasattr(self, "instance_decoder") and self.global_step > 1000:
-               if isinstance(batchA, Batch):
-                   batchA = Batch([self.instance_decoder.materialize(b) for b in batchA.to_data_list()])
-               else:
-                   self.instance_decoder.materialize(batchA)
-                   
+        if hasattr(self, "instance_decoder") and self.global_step > 1000:
+           if isinstance(batchA, Batch):
+              batchA = Batch([self.instance_decoder.materialize(b) for b in batchA.to_data_list()])
+           else:
+              self.instance_decoder.materialize(batchA)
+
         return total_loss, total_metrics
+
 
     def on_train_start(self):
         hpmetrics = { 'max_lr': self.hparams.lr }
