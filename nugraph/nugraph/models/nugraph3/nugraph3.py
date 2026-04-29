@@ -224,12 +224,13 @@ class NuGraph3(LightningModule):
                use_da  = self.event_decoder.use_domain_adaptation if n == 0 else self.semantic_decoder.use_domain_adaptation
                if hasattr(self,name) and hasattr(decoder, "use_domain_adaptation"):
                   if epoch >= getattr(decoder, "warmup_epochs", 0):
-                     if not use_da: 
-                        print(f"[Epoch {epoch}] Enabling DA for {name}")
-                     else:
-                        print(f"[Epoch {epoch}] Enabling DA for {name}")
-                        if n == 0 : self.event_decoder.use_domain_adaptation = True
-                        elif n == 1 : self.semantic_decoder.use_domain_adaptation = True
+                     if not use_da:
+                        if n == 0: 
+                           print(f"[Epoch {epoch}] Enabling DA for {name}")
+                           self.event_decoder.use_domain_adaptation = True
+                        elif n == 1:
+                           print(f"[Epoch {epoch}] DA is manually disabled for {name} — will not enable DA")
+                           #self.semantic_decoder.use_domain_adaptation = True
                   else:
                      print(f"[Epoch {epoch}] DA is OFF for {name} (warmup phase)")
             
