@@ -2,8 +2,6 @@
 from typing import Callable, Optional
 import h5py
 from torch_geometric.data import Dataset
-from torch_geometric.data import HeteroData
-
 from pynuml.data import NuGraphData
 
 class NuGraphDataset(Dataset):

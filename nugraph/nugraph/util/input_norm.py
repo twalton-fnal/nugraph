@@ -20,7 +20,7 @@ class InputNorm(torch.nn.Module):
             "count": P(torch.zeros(1, dtype=torch.long), requires_grad=False)})
 
         # whether to continue updating running averages
-        self.update = True
+        self.update = False #True
 
     def forward(self, x: torch.Tensor) -> torch.Tensor: # pylint: disable=arguments-differ
         """
@@ -29,7 +29,7 @@ class InputNorm(torch.nn.Module):
         Args:
             x: Tensor to normalize
         """
-
+        
         # update running average
         if self.update and self.training:
 
@@ -47,6 +47,8 @@ class InputNorm(torch.nn.Module):
             self.norm["count"] = P(n, requires_grad=False)
             self.norm["mean"] = P(mean, requires_grad=False)
             self.norm["var"] = P(var, requires_grad=False)
-
+        
         # return normalized tensor
         return (x - self.norm["mean"][None, :]) / (self.norm["var"][None, :] + 1e-5).sqrt()
+        
+       

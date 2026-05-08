@@ -11,13 +11,10 @@ import torch
 from torch import tensor, cat
 from torch.utils.data import random_split
 from torch_geometric.loader import DataLoader
-from torch_geometric.transforms import Compose
 from pytorch_lightning import LightningDataModule
 from itertools import islice, cycle 
 
 from ..data import NuGraphDataset, NuGraphCombinedDataset, NuGraphCombinedDatasetCycle, BalanceSampler
-from ..util import PositionFeatures, FeatureNormMetric, FeatureNorm, HierarchicalEdges, EventLabels
-
 
 DEFAULT_DATA = ("$NUGRAPH_DATA/uboone-opendata/"
                 "uboone-opendata-19be46d89d0f22f5a78641d724c1fedd.gnn.h5")
@@ -52,7 +49,6 @@ class NuGraphDataModule(LightningDataModule):
         self.shuffle = shuffle
         self.balance_frac = balance_frac
 
-        transform = None
         filenames = [ self.source_filename, self.target_filename ]
         for file_index, filename in enumerate(filenames):
 
@@ -104,25 +100,9 @@ class NuGraphDataModule(LightningDataModule):
                      print(("Data size array not found in file! "
                             "Call \"generate_samples\" to create it."))
                      sys.exit()
-                
-                 # load feature normalizations
-                 try:
-                     norm = {}
-                     for p in self.planes:
-                         norm[p] = tensor(f[f'norm/{p}'][()])
-                 except KeyError:
-                     print(("Feature normalisations not found in file! "
-                            "Call \"generate_norm\" to create them."))
-                     sys.exit()             
 
-            if not self.target_filename:
-                transform = model.transform(self.planes) if model else None
-            else:
-                transform = Compose((PositionFeatures(self.planes),
-                                     FeatureNorm(self.planes,norm),
-                                     HierarchicalEdges(self.planes),
-                                     EventLabels()))
-                                   
+            transform = model.transform(self.planes) if model else None
+
             if file_index == 0 :
                self.source_transform = transform
             else:
@@ -193,39 +173,14 @@ class NuGraphDataModule(LightningDataModule):
         with h5py.File(data_path, "r+") as f:
             f.create_dataset('datasize/train', data=dsize)
 
-
-    @staticmethod
-    def generate_norm(data_path: str, batch_size: int):
-        with h5py.File(data_path, 'r+') as f:
-            # load plane metadata
-            try:
-                planes = f['planes'].asstr()[()].tolist()
-            except:
-                print('Metadata not found in file! "planes" is required.')
-                sys.exit()
-
-            loader = DataLoader(NuGraphDataset(data_path,list(f['dataset'].keys()),PositionFeatures(planes)),
-                                batch_size=batch_size)
-            metrics = None
-            for batch in tqdm.tqdm(loader):
-                for p in planes:
-                    if not metrics:
-                        num_feats = batch[p].x.shape[-1]
-                        metrics = { p: FeatureNormMetric(num_feats) for p in planes }
-                    metrics[p].update(batch[p].x)
-            for p in planes:
-                key = f'norm/{p}'
-                if key in f:
-                    del f[key]
-                f[key] = metrics[p].compute()
-
     @staticmethod
     def collate_func(batch):
         """
             Custom collate function to combine a batch of paired dataset items.
         
-            Converts a list of tuples (from CombinedDataset or CombinedDatasetCycle)
-            into two batched objects, one for each dataset.
+            Converts a list of tuples (from NugraphCombinedDataset or 
+            NugraphCombinedDatasetCycle) into two batched objects, one 
+            for each dataset.
         
             Args:
                 batch (list of tuples): Each element is a tuple (dataA, dataB).

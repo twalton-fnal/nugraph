@@ -17,7 +17,7 @@ class PositionFeatures(BaseTransform):
         super().__init__()
         self.planes = planes
 
-    def forward(self, data: HeteroData) -> HeteroData:
+    def __call__(self, data: HeteroData) -> HeteroData:
         """
         Apply a transform to concatenate the node position onto the node feature tensor
 

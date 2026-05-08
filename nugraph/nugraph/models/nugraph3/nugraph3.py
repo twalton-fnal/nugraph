@@ -78,29 +78,30 @@ class NuGraph3(LightningModule):
         self.nexus_features = nexus_features
         self.interaction_features = interaction_features
 
-        self.planes = planes
         self.semantic_classes = semantic_classes
         self.event_classes = event_classes
         self.num_iters = num_iters
         self.lr = lr
         self.warmup_epochs = warmup_epochs
+
+        self.event_head = event_head
+        self.semantic_head = semantic_head
+        
         self.da_loss_fnc_name = da_loss_fnc_name
         self.domain_adaptation_classes = [ "dann", "mmd", "semantic", "sinkhorn" ]
 
-        # encoder followed by calling nugraphCore
-        if da_loss_fnc_name == None:
-           self.encoder  = Encoder(in_features, hit_features, nexus_features, interaction_features, 
-                                   instance_features=instance_features)
-           self.core_net = NuGraphCore(hit_features, nexus_features, interaction_features,
-                                       instance_features=instance_features, use_checkpointing=use_checkpointing)
-        else: 
-           self.encoder  = Encoder(in_features, hit_features, nexus_features, interaction_features,
-                                   planes=planes)
-           self.core_net = NuGraphCore(hit_features, nexus_features, interaction_features,
-                                       planes=planes, use_checkpointing=use_checkpointing)
-        self.decoders = []
+        # encoder 
+        self.encoder = Encoder(in_features, hit_features, nexus_features, interaction_features, 
+                               instance_features=instance_features)
 
+        # message-passing core
+        self.core_net = NuGraphCore(hit_features, nexus_features, interaction_features,
+                                    instance_features=instance_features, 
+                                    use_checkpointing=use_checkpointing)
+        
         # decoder functionalities
+        self.decoders = []
+        
         if event_head:
             self.event_decoder = EventDecoder(interaction_features, event_classes, 
                                               da_loss_fnc_name=self.da_loss_fnc_name, 
@@ -109,7 +110,6 @@ class NuGraph3(LightningModule):
 
         if semantic_head:
             self.semantic_decoder = SemanticDecoder(hit_features, semantic_classes, 
-                                                    planes=self.planes,
                                                     da_loss_fnc_name=self.da_loss_fnc_name, 
                                                     warmup_epochs=self.warmup_epochs)
             self.decoders.append(self.semantic_decoder)
@@ -137,7 +137,7 @@ class NuGraph3(LightningModule):
         self.max_mem_cpu = 0.
         self.max_mem_gpu = 0.    
 
-    def forward(self, data: list[Data], stage: str = None): # pylint: disable=arguments-differ
+    def forward(self, data: Data | list[Data], stage: str = None): # pylint: disable=arguments-differ
         """
         NuGraph3 forward function
 
@@ -152,46 +152,44 @@ class NuGraph3(LightningModule):
         
         # Check if the input is a list of two batches
         batchA = data
-
         if self.da_loss_fnc_name in self.domain_adaptation_classes:
            if isinstance(data, list) and len(data) == 2:
               batchA, batchB = data
            else:
               raise ValueError("Expected input data to be a list of two batches.")
-        
-        self.encoder(batchA)
-        for _ in range(self.num_iters):
-            self.core_net(batchA)
 
+        # run the encoder and message-passing blocks
         if self.da_loss_fnc_name in self.domain_adaptation_classes:
-           self.encoder(batchB)
+           self.encoder(data=[batchA,batchB])
            for _ in range(self.num_iters):
+               self.core_net(batchA)
                self.core_net(batchB)
-            
+        else:
+           self.encoder(batchA)
+           for _ in range(self.num_iters):
+               self.core_net(batchA)
+        
+        # determine if the DA loss function is enabled for a decoder
+        enable_da_decoders = []
+        if self.da_loss_fnc_name in self.domain_adaptation_classes:
+           if self.event_head: enable_da_decoders.append( self.event_decoder )
+           if self.semantic_head: enable_da_decoders.append( self.semantic_decoder )
+        
+        # run the decoders and calculate the loss and metrics
         total_loss = 0.
         total_metrics = {}
-
-        # calculate the loss and metrics
+        
         for decoder in self.decoders:
-            if decoder in [self.event_decoder, self.semantic_decoder]: 
-               if not self.da_loss_fnc_name in self.domain_adaptation_classes:
-                  loss, metrics = decoder(data=batchA, stage=stage)
-               else :
-                  loss, metrics = decoder(data=[batchA, batchB], stage=stage)
+            if decoder in enable_da_decoders:
+               loss, metrics = decoder(data=[batchA, batchB], stage=stage)
             else:
                loss, metrics = decoder(data=batchA, stage=stage)
             total_loss += loss
             total_metrics.update(metrics)
-
-        if hasattr(self, "instance_decoder") and self.global_step > 1000:
-           if isinstance(batchA, Batch):
-              batchA = Batch([self.instance_decoder.materialize(b) for b in batchA.to_data_list()])
-           else:
-              self.instance_decoder.materialize(batchA)
-
+                   
         return total_loss, total_metrics
 
-
+    
     def on_train_start(self):
         hpmetrics = { 'max_lr': self.hparams.lr }
         self.logger.log_hyperparams(self.hparams, metrics=hpmetrics)
@@ -209,28 +207,31 @@ class NuGraph3(LightningModule):
             ]]
         self.logger.experiment.add_custom_scalars(scalars)
 
+    
     def on_train_epoch_start(self) -> None:
         if self.da_loss_fnc_name == None:
-           print("\n Enter training epoch")
-        else:     
+           print("\nEnter training epoch")
+        else:
+           """ Check and toggle DA for event_decoder and semantic_decoder"""  
            epoch = self.trainer.current_epoch
+           for name, decoder in {"event_decoder": getattr(self, "event_decoder", None),
+                                 "semantic_decoder": getattr(self, "semantic_decoder", None)
+                                }.items():
+               if decoder is None or not hasattr(decoder, "use_domain_adaptation"):
+                  continue
 
-           """ Check and toggle DA for event_decoder and semantic_decoder"""
-           for n in range(0,2): 
-               name    = "event_decoder" if n == 0 else "semantic_decoder"
-               decoder = self.event_decoder if n == 0 else self.semantic_decoder
-               use_da  = self.event_decoder.use_domain_adaptation if n == 0 else self.semantic_decoder.use_domain_adaptation
-               if hasattr(self,name) and hasattr(decoder, "use_domain_adaptation"):
-                  if epoch >= getattr(decoder, "warmup_epochs", 0):
-                     if not use_da:
-                        if n == 0: 
-                           print(f"[Epoch {epoch}] Enabling DA for {name}")
-                           self.event_decoder.use_domain_adaptation = True
-                        elif n == 1:
-                           print(f"[Epoch {epoch}] DA is manually disabled for {name} — will not enable DA")
-                           #self.semantic_decoder.use_domain_adaptation = True
+               if epoch < getattr(decoder, "warmup_epochs", 0):
+                  print(f"[Epoch {epoch}] DA is OFF for {name} (warmup phase)")
+                  continue
+
+               if not decoder.use_domain_adaptation:
+                  if name == "semantic_decoder":
+                     print(f"[Epoch {epoch}] DA is manually disabled for {name} — will not enable DA")
+                     decoder.use_domain_adaptation = False
                   else:
-                     print(f"[Epoch {epoch}] DA is OFF for {name} (warmup phase)")
+                     print(f"[Epoch {epoch}] Enabling DA for {name}") 
+                     decoder.use_domain_adaptation = True
+
             
     def on_train_epoch_end(self) -> None:
         if self.da_loss_fnc_name == None:
@@ -238,9 +239,10 @@ class NuGraph3(LightningModule):
            self.encoder.input_norm.update = False
         else:
            print("\n Finished training epoch")        
+
         
     def training_step(self,
-                      batch: list[Data],
+                      batch: Data | list[Data],
                       batch_idx: int) -> float:
         loss, metrics = self(batch, 'train')
         if isinstance(batch, list) and len(batch) == 2:
@@ -259,7 +261,7 @@ class NuGraph3(LightningModule):
             decoder.on_epoch_end(self.logger, 'val', epoch)    
     
     def validation_step(self,
-                        batch: list[Data],
+                        batch: Data | list[Data],
                         batch_idx: int) -> None:
         loss, metrics = self(batch, 'val')
         if isinstance(batch, list) and len(batch) == 2:
@@ -275,7 +277,7 @@ class NuGraph3(LightningModule):
             decoder.on_epoch_end(self.logger, 'test', epoch)
    
     def test_step(self,
-                  batch: list[Data],
+                  batch: Data | list[Data],
                   batch_idx: int = 0) -> None:
         loss, metrics = self(batch, 'test')
         if isinstance(batch, list) and len(batch) == 2:
@@ -307,7 +309,7 @@ class NuGraph3(LightningModule):
         self.event_decoder.eta_t.data.clamp_(min=1e-3, max = 1)
         self.event_decoder.eta_da.data.clamp_(min=1e-3, max = 1)
         
-    def log_memory(self, batch: list[Data], stage: str) -> None:
+    def log_memory(self, batch: Data | list[Data], stage: str) -> None:
         """
         Log CPU and GPU memory usage
 
@@ -406,7 +408,7 @@ class NuGraph3(LightningModule):
         """
         return cls(
             in_features=args.in_feats,
-            hit_features=args.plane_feats,
+            hit_features=args.hit_feats,
             nexus_features=args.nexus_feats,
             interaction_features=args.interaction_feats,
             instance_features=args.instance_feats,

@@ -17,7 +17,7 @@ class Transform(BaseTransform):
     def forward(self, data: NuGraphData) -> NuGraphData:
 
         """
-        Apply transform for compatibility with NuGraph3 model
+        Apply the transform for compatibility with the NuGraph3 model
 
         Args:
            data: NuGraph data object to transform
@@ -86,8 +86,8 @@ class Transform(BaseTransform):
         # ensure event truth labels have correct format
         evt = data["evt"]
         if not evt.y.ndim:
-            evt.y = evt.y.reshape([1])
-
+           evt.y = evt.y.reshape([1])
+            
         # concatenate position tensor onto node features
         h = data["hit"]
         h.x = torch.cat((h.pos, h.x), dim=-1)

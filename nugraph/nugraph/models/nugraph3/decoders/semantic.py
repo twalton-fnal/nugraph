@@ -29,13 +29,11 @@ class SemanticDecoder(nn.Module):
     Args:
         hit_features: Number of planar hit node features
         semantic_classes: List of semantic classes
-        planes: List of detector planes
         
     """
     def __init__(self,
                  hit_features: int,
                  semantic_classes: list[str],
-                 planes: list[str] = None,
                  da_loss_fnc_name: str = None,
                  warmup_epochs: int = 0):
         super().__init__()

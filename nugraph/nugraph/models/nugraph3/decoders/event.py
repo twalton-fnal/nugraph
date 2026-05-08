@@ -7,7 +7,8 @@ import torch
 from torch import nn
 import torchmetrics as tm
 from torch_geometric.data import Batch
-from pytorch_lightning.loggers import Logger, TensorBoardLogger
+from pytorch_lightning.loggers import Logger
+#, TensorBoardLogger
 
 from ....util import ConfusionMatrixLogger, RecallLoss
 from ....util.DANNLoss import ReverseLayerF
@@ -81,7 +82,7 @@ class EventDecoder(nn.Module):
            self.domain_classes = ['source', 'target']
 
     
-    def forward(self, data: list[Data], stage: str = None) -> dict[str, Any]:
+    def forward(self, data: Data | list[Data], stage: str = None) -> dict[str, Any]:
         """
         NuGraph3 event decoder forward pass
 
@@ -102,16 +103,15 @@ class EventDecoder(nn.Module):
         x_source = self.net(source_data["evt"].x)
         y_source = source_data["evt"].y
         w_source = 2 * (-1 * self.source_temp).exp()
-        loss_no_w_source = self.loss(x_source, y_source)
-        loss_source = w_source * loss_no_w_source + self.source_temp
+        loss_source = w_source * self.loss(x_source, y_source) + self.source_temp
         
         if self.da_loss_fnc_name == None:
            loss = loss_source
-            
+    
         if self.da_loss_fnc_name in self.domain_adaptation_classes:
            x_target = self.net(target_data["evt"].x)
            y_target = target_data["evt"].y
-           w_target = 2 * (-1 * self.target_temp).exp()  # SHOULD TARGET HAVE ITS OWN WEIGHT?
+           w_target = 2 * (-1 * self.target_temp).exp() 
            loss_target = w_target * self.loss(x_target, y_target) + self.target_temp           
 
         """
@@ -147,40 +147,36 @@ class EventDecoder(nn.Module):
            loss = loss_source + loss_target + lossDA
         else:
            loss = loss_source + loss_target
+
         
         # calculate metrics
         metrics = {}
+        
+        name = "_source/" if self.da_loss_fnc_name else "/"
         if stage:
-            if self.da_loss_fnc_name == None:
-               metrics[f"event/loss-{stage}"] = loss
-               metrics[f"event/recall-{stage}"] = self.source_recall(x_source, y_source)
-               metrics[f"event/precision-{stage}"] = self.source_precision(x_source, y_source)
-            else:
-               metrics[f"loss_event_total/{stage}"] = loss
-               metrics[f"recall_event_source/{stage}"] = self.source_recall(x_source, y_source)
-               metrics[f"precision_event_source/{stage}"] = self.source_precision(x_source, y_source)
-               metrics[f"recall_event_target/{stage}"] = self.target_recall(x_target, y_target)
-               metrics[f"precision_event_target/{stage}"] = self.target_precision(x_target, y_target)
-               metrics[f"loss_event_source/{stage}"] = loss_source
-               metrics[f"loss_event_target/{stage}"] = loss_target
-               metrics[f"Using_DA_or_not/{stage}"] = 1
+           metrics[f"loss_event{name}{stage}"] = loss
+           metrics[f"recall_event{name}{stage}"] = self.source_recall(x_source, y_source)
+           metrics[f"precision_event{name}{stage}"] = self.source_precision(x_source, y_source)
+           if self.da_loss_fnc_name: 
+              metrics[f"recall_event_target/{stage}"] = self.target_recall(x_target, y_target)
+              metrics[f"precision_event_target/{stage}"] = self.target_precision(x_target, y_target)
+              metrics[f"loss_event_source/{stage}"] = loss_source
+              metrics[f"loss_event_target/{stage}"] = loss_target
+              metrics[f"Using_DA_or_not/{stage}"] = 1
+              if self.da_loss_fnc_name == "dann":
+                 metrics[f"DA_loss_capped_event/{stage}"] = lossDA
+                 metrics[f"DA_loss_uncapped_event/{stage}"] = raw_lossDA 
 
-               if self.da_loss_fnc_name == "dann":
-                  metrics[f"DA_loss_capped_event/{stage}"] = lossDA
-                  metrics[f"DA_loss_uncapped_event/{stage}"] = raw_lossDA 
-            
+        name = "event_source" if self.da_loss_fnc_name else "event"
         if stage == "train":
-            if self.da_loss_fnc_name == None:
-               metrics["temperature/event"] = self.source_temp
-            else:
-               metrics["temperature/event_source"] = self.source_temp
-               metrics["temperature/event_target"] = self.target_temp
-               metrics["temperature/event_DA"] = self.da_temp
+           metrics[f"temperature/{name}"] = self.source_temp
+           if self.da_loss_fnc_name:             
+              metrics["temperature/event_target"] = self.target_temp
+              metrics["temperature/event_DA"] = self.da_temp
             
         if stage in ["val", "test"]:
             self.source_cm_recall.update(x_source, y_source)
-            self.source_cm_precision.update(x_source, y_source)
-            
+            self.source_cm_precision.update(x_source, y_source)            
             if self.da_loss_fnc_name in self.domain_adaptation_classes:
                self.target_cm_recall.update(x_target, y_target)
                self.target_cm_precision.update(x_target, y_target)
@@ -203,6 +199,7 @@ class EventDecoder(nn.Module):
         
         return loss, metrics
 
+    
     def draw_confusion_matrix(self, cm: tm.ConfusionMatrix) -> plt.Figure:
         """
         Draw a confusion matrix
