@@ -1,5 +1,6 @@
 """NuGraph3 event decoder"""
 from typing import Any
+import sys
 import matplotlib.pyplot as plt
 import seaborn as sn
 import tempfile
@@ -8,17 +9,26 @@ from torch import nn
 import torchmetrics as tm
 from torch_geometric.data import Batch
 from pytorch_lightning.loggers import Logger
-#, TensorBoardLogger
 
-from ....util import ConfusionMatrixLogger, RecallLoss
+from ..types import Data
+from ....util import RecallLoss, ConfusionMatrixLogger
+from ....util.SinkhornLoss import Sinkhorn
+from ....util.SemanticLoss import SemanticAlignmentLoss
+from ....util.MMDLoss import MMDLoss
 from ....util.DANNLoss import ReverseLayerF
 from ....util.EmbeddingPlotter import CombinedEmbeddingPlot
-from ..types import Data
+
 
 class EventDecoder(nn.Module):
     """
     NuGraph3 event decoder module, which includes the option
-    to enable the Domain Adaptation on event-level features
+    to enable the Domain Adaptation (DA) on event-level features
+
+    The implemented DA loss functions are:
+    - Domain-Adversarial Neural Networks (dann)
+    - Maximum Mean Discrepancy (mmd)
+    - Semantic loss (semantic)
+    - Sinkhorn loss (sinkhorn)
 
     Convolve the interaction node embedding down to a set of categorical scores
     for each event class.
@@ -43,7 +53,17 @@ class EventDecoder(nn.Module):
         self.loss = RecallLoss()
         if self.da_loss_fnc_name == "dann":
            self.loss_dann = nn.CrossEntropyLoss()  
-           loss_dann = torch.tensor(0.0)    
+           loss_dann = torch.tensor(0.0)
+        elif self.da_loss_fnc_name == "mmd":
+           self.loss_mmd = MMDLoss()  
+           loss_mmd = torch.tensor(0.0)
+        elif self.da_loss_fnc_name == "semantic":
+           semantic_metric = "cosine" #or metric='euclidean'
+           self.loss_semantic = SemanticAlignmentLoss(semantic_metric) 
+           loss_semantic = torch.tensor(0.0)  
+        elif self.da_loss_fnc_name == "sinkhorn":
+           self.loss_sinkhorn = Sinkhorn(blur=0.05)
+           loss_sinkhorn = torch.tensor(0.0) 
         
         # temperature parameter
         self.source_temp = nn.Parameter(torch.tensor(0.))
@@ -120,52 +140,69 @@ class EventDecoder(nn.Module):
            All losses are scaled by their own temperatures, which are trainable parameters.
            DA loss is also capped at most 1/4 of the loss_source (to be on the safe side). 
         """ 
-        if self.use_domain_adaptation and self.da_loss_fnc_name == "dann":  
-           # Domain Classification
-           alpha = 1   # Weight of DA is handeled by weight wDA so alpha=1 inside of the gradient reversal layer
-           reversed_S = ReverseLayerF.apply(source_data["evt"].x, alpha)
-           xSS = self.domain_net(reversed_S)
-           ySS = torch.zeros(xSS.shape[0]).type(torch.LongTensor)
-    
-           reversed_T = ReverseLayerF.apply(target_data["evt"].x, alpha)
-           xTT = self.domain_net(reversed_T)
-           yTT = torch.ones(xTT.shape[0]).type(torch.LongTensor)
-    
-           combined_image = torch.cat((xSS, xTT), 0).cuda()
-           combined_label = torch.cat((ySS, yTT), 0).cuda()
-
+        if self.use_domain_adaptation:  
            wDA = 2 * (-1 * self.da_temp).exp()
-           raw_lossDA = wDA * self.loss_dann(combined_image, combined_label) + self.da_temp 
-
-           # Smooth capping of the DA based on the source event loss value (currently to be at most 1/4 of the event loss value)
-           sharp = 20.0  # sharpness of transition when source event loss goes from positive to negative
+            
+           if self.da_loss_fnc_name == "dann":  
+              alpha = 1   # Weight of DA is handeled by weight wDA so alpha=1 inside of the gradient reversal layer
+              reversed_S = ReverseLayerF.apply(source_data["evt"].x, alpha)
+              xSS = self.domain_net(reversed_S)
+              ySS = torch.zeros(xSS.shape[0]).type(torch.LongTensor)
+    
+              reversed_T = ReverseLayerF.apply(target_data["evt"].x, alpha)
+              xTT = self.domain_net(reversed_T)
+              yTT = torch.ones(xTT.shape[0]).type(torch.LongTensor)
+    
+              combined_image = torch.cat((xSS, xTT), 0).cuda()
+              combined_label = torch.cat((ySS, yTT), 0).cuda()
+               
+              raw_lossDA = wDA * self.loss_dann(combined_image, combined_label) + self.da_temp 
+           elif self.da_loss_fnc_name == "sinkhorn":
+              airwise_distances = torch.cdist(source_data["evt"].x, target_data["evt"].x, p=2)
+              flattened_distances = pairwise_distances.view(-1)
+              max_distance = torch.max(flattened_distances)
+              dynamic_blur_val = 0.05 * max_distance.detach().cpu().numpy()
+               
+              raw_lossDA = wDA * self.loss_sinkhorn(source_data["evt"].x, 
+                                                    target_data["evt"].x, blur=max(dynamic_blur_val, 0.01)) + self.temp_DA
+           elif self.da_loss_fnc_name == "mmd":  
+              raw_lossDA = wDA * self.loss_mmd(source_data["evt"].x, target_data["evt"].x) + self.da_temp 
+           elif self.da_loss_fnc_name == "semantic":
+              raw_lossDA = self.loss_semantic(source_data["evt"].x, y_source, target_data["evt"].x, y_target) 
+           else:
+              sys.exit( f"The function {self.da_loss_fnc_name} does not exist." )
+               
+           """
+             Smooth capping of the DA based on the source event loss value 
+             (currently to be at most 1/4 of the event loss value)
+             The "sharp" variable is the sharpness of the transition when the 
+             source event loss goes from positive to negative
+           """
+           sharp = 20.0  
            sig = torch.sigmoid(sharp * loss_source)
            max_lossDA = sig * (loss_source / 4) + (1 - sig) * (4 * loss_source)
-           lossDA = torch.min(raw_lossDA, max_lossDA)
+           lossDA = torch.min(raw_lossDA, max_lossDA)           
+            
+        # total loss
+        loss = loss_source + loss_target + lossDA
 
-           # Total loss
-           loss = loss_source + loss_target + lossDA
-        else:
-           loss = loss_source + loss_target
-
-        
         # calculate metrics
         metrics = {}
         
-        name = "_source/" if self.da_loss_fnc_name else "/"
+        name = "_source_%s/" % self.da_loss_fnc_name if self.da_loss_fnc_name else "/"
         if stage:
            metrics[f"loss_event{name}{stage}"] = loss
            metrics[f"recall_event{name}{stage}"] = self.source_recall(x_source, y_source)
            metrics[f"precision_event{name}{stage}"] = self.source_precision(x_source, y_source)
            if self.da_loss_fnc_name: 
-              metrics[f"recall_event_target/{stage}"] = self.target_recall(x_target, y_target)
-              metrics[f"precision_event_target/{stage}"] = self.target_precision(x_target, y_target)
-              metrics[f"loss_event_source/{stage}"] = loss_source
-              metrics[f"loss_event_target/{stage}"] = loss_target
-              metrics[f"Using_DA_or_not/{stage}"] = 1
-              if self.da_loss_fnc_name == "dann":
-                 metrics[f"DA_loss_capped_event/{stage}"] = lossDA
-                 metrics[f"DA_loss_uncapped_event/{stage}"] = raw_lossDA 
+              name = "_%s/" % self.da_loss_fnc_name  
+              metrics[f"recall_event_target{name}{stage}"] = self.target_recall(x_target, y_target)
+              metrics[f"precision_event_target{name}{stage}"] = self.target_precision(x_target, y_target)
+              metrics[f"loss_event_source{name}{stage}"] = loss_source
+              metrics[f"loss_event_target{name}{stage}"] = loss_target
+              if self.use_domain_adaptation:
+                 metrics[f"DA_loss_capped_event{name}{stage}"] = lossDA
+                 metrics[f"DA_loss_uncapped_event{name}{stage}"] = raw_lossDA 
 
         name = "event_source" if self.da_loss_fnc_name else "event"
         if stage == "train":

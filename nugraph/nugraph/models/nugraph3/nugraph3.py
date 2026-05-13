@@ -84,9 +84,6 @@ class NuGraph3(LightningModule):
         self.lr = lr
         self.warmup_epochs = warmup_epochs
 
-        self.event_head = event_head
-        self.semantic_head = semantic_head
-        
         self.da_loss_fnc_name = da_loss_fnc_name
         self.domain_adaptation_classes = [ "dann", "mmd", "semantic", "sinkhorn" ]
 
@@ -168,19 +165,22 @@ class NuGraph3(LightningModule):
            self.encoder(batchA)
            for _ in range(self.num_iters):
                self.core_net(batchA)
-        
+
+    
         # determine if the DA loss function is enabled for a decoder
         enable_da_decoders = []
-        if self.da_loss_fnc_name in self.domain_adaptation_classes:
-           if self.event_head: enable_da_decoders.append( self.event_decoder )
-           if self.semantic_head: enable_da_decoders.append( self.semantic_decoder )
-        
+        for name, decoder in {"event_decoder": getattr(self, "event_decoder", None),
+                              "semantic_decoder": getattr(self, "semantic_decoder", None)
+                             }.items():
+            if decoder and hasattr(decoder, "use_domain_adaptation"):
+               enable_da_decoders.append( decoder )
+
         # run the decoders and calculate the loss and metrics
         total_loss = 0.
         total_metrics = {}
         
         for decoder in self.decoders:
-            if decoder in enable_da_decoders:
+            if enable_da_decoders and decoder in enable_da_decoders:
                loss, metrics = decoder(data=[batchA, batchB], stage=stage)
             else:
                loss, metrics = decoder(data=batchA, stage=stage)
@@ -188,24 +188,6 @@ class NuGraph3(LightningModule):
             total_metrics.update(metrics)
                    
         return total_loss, total_metrics
-
-    
-    def on_train_start(self):
-        hpmetrics = { 'max_lr': self.hparams.lr }
-        self.logger.log_hyperparams(self.hparams, metrics=hpmetrics)
-        self.max_mem_cpu = 0.
-        self.max_mem_gpu = 0.
-
-        scalars = {
-            'loss': {'loss': [ 'Multiline', [ 'loss/train', 'loss/val' ]]},
-            'acc': {}
-        }
-        for c in self.semantic_classes:
-            scalars['acc'][c] = [ 'Multiline', [
-                f'semantic_accuracy_class_train/{c}',
-                f'semantic_accuracy_class_val/{c}'
-            ]]
-        self.logger.experiment.add_custom_scalars(scalars)
 
     
     def on_train_epoch_start(self) -> None:

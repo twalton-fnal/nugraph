@@ -11,4 +11,6 @@ from .input_norm import InputNorm
 
 """Domain Adaptation related updates"""
 from .DANNLoss import ReverseLayerF
-
+from .MMDLoss import MMDLoss
+from .SemanticLoss import SemanticAlignmentLoss
+from .SinkhornLoss import Sinkhorn

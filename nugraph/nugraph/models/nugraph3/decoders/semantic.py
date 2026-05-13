@@ -8,7 +8,7 @@ import torch
 import torchmetrics as tm
 from torch import nn
 from torch_geometric.data import Batch
-from pytorch_lightning.loggers import Logger, TensorBoardLogger
+from pytorch_lightning.loggers import Logger
 
 from ....util import ConfusionMatrixLogger, RecallLoss
 from ....util.DANNLoss import ReverseLayerF
@@ -77,12 +77,7 @@ class SemanticDecoder(nn.Module):
            self.embeddings = CombinedEmbeddingPlot(method="umap")
 
         # network
-        if self.da_loss_fnc_name in self.domain_adaptation_classes:
-           self.net = self.net = nn.ModuleDict()
-           for p in planes:
-               self.net[p] = nn.Linear(hit_features, len(semantic_classes))
-        else:
-           self.net = nn.Linear(hit_features, len(semantic_classes))
+        self.net = nn.Linear(hit_features, len(semantic_classes))
             
         self.classes = semantic_classes
 
@@ -93,7 +88,7 @@ class SemanticDecoder(nn.Module):
            self.domain_classes = ['source', 'target']
 
     
-    def forward(self, data: list[Data], stage: str = None) -> dict[str, Any]:
+    def forward(self, data: Data | list[Data], stage: str = None) -> dict[str, Any]:
         """
         NuGraph3 semantic decoder forward pass
 
@@ -107,8 +102,9 @@ class SemanticDecoder(nn.Module):
            source_data = data
         else:
            source_data, target_data = data 
+
             
-        # run network and add output to graph object       
+        # run network and add output to graph object      
         def _run_net_and_add_output(data: Any, net: torch.nn.Module, key: str):
             data[key].x_semantic = net(data[key].x)
             if isinstance(data, Batch):
@@ -116,31 +112,32 @@ class SemanticDecoder(nn.Module):
                inc = torch.zeros(data.num_graphs, device=data[key].x.device)
                data._inc_dict[key]["x_semantic"] = inc
 
+        _run_net_and_add_output(source_data, self.net, "hit")
         if self.da_loss_fnc_name in self.domain_adaptation_classes:
+           _run_net_and_add_output(target_data, self.net, "hit")
+
+        
+        """ 
            for p, net in self.net.items():
                _run_net_and_add_output(source_data, net, p)
                _run_net_and_add_output(target_data, net, p)
         else :
            _run_net_and_add_output(source_data, self.net, "hit")
+        """
 
         # calculate loss
         loss = loss_source = loss_target = lossDA = raw_lossDA = 0
-        
-        if not self.da_loss_fnc_name in self.domain_adaptation_classes:
-           source_x = source_data["hit"].x_semantic
-           source_y = source_data["hit"].y_semantic
-           source_w = 2 * (-1 * self.source_temp).exp()
-           loss_source = source_w * self.loss(source_x, source_y) + self.source_temp
-        else:
-            source_x = torch.cat([source_data[p].x_semantic for p in self.net], dim=0)
-            source_y = torch.cat([source_data[p].y_semantic for p in self.net], dim=0)
-            source_w = 2 * (-1 * self.source_temp).exp()
-            loss_source = source_w * self.loss(source_x, source_y) + self.source_temp
-        
-            target_x = torch.cat([target_data[p].x_semantic for p in self.net], dim=0)
-            target_y = torch.cat([target_data[p].y_semantic for p in self.net], dim=0)
-            target_w = 2 * (-1 * self.target_temp).exp()
-            loss_target = target_w * self.loss(target_x, target_y) + self.target_temp
+    
+        x_source = source_data["hit"].x_semantic
+        y_source = source_data["hit"].y_semantic
+        w_source = 2 * (-1 * self.source_temp).exp()
+        loss_source = w_source * self.loss(x_source, y_source) + self.source_temp
+            
+        if self.da_loss_fnc_name in self.domain_adaptation_classes:
+           x_target = target_data["hit"].x_semantic
+           y_target = target_data["hit"].y_semantic
+           w_target = 2 * (-1 * self.target_temp).exp()
+           loss_target = w_target * self.loss(x_target, y_target) + self.target_temp
             
         if self.da_loss_fnc_name == None:
            loss = loss_source
@@ -193,48 +190,39 @@ class SemanticDecoder(nn.Module):
             
         # calculate metrics
         metrics = {}
-        if self.da_loss_fnc_name == None:
-           if stage:
-              metrics[f"semantic/loss-{stage}"] = loss
-              metrics[f"semantic/recall-{stage}"] = self.source_recall(source_x, source_y)
-              metrics[f"semantic/precision-{stage}"] = self.source_precision(source_x, source_y)
-        else:
-            if stage:
-               metrics[f"loss_semantic/{stage}"] = loss
-               metrics[f"recall_semantic_source/{stage}"] = self.source_recall(source_x, source_y)
-               metrics[f"precision_semantic_source/{stage}"] = self.source_precision(source_x, source_y)
-               metrics[f"recall_semantic_target/{stage}"] = self.target_recall(target_x, target_y)
-               metrics[f"precision_semantic_target/{stage}"] = self.target_precision(target_x, target_y)
-               metrics[f"loss_semantic_source/{stage}"] = loss_source
-               metrics[f"loss_semantic_target/{stage}"] = loss_target
-                
-               if self.use_domain_adaptation:
-                  metrics[f"DA_loss_capped_semantic/{stage}"] = lossDA
-                  metrics[f"DA_loss_uncapped_semantic/{stage}"] = raw_lossDA 
-            
+
+        name = "_source/" if self.da_loss_fnc_name else "/"
+        if stage:
+           metrics[f"loss_semantic{name}{stage}"] = loss
+           metrics[f"recall_semantic{name}{stage}"] = self.source_recall(x_source, y_source)
+           metrics[f"precision_semantic{name}{stage}"] = self.source_precision(x_source, y_source)
+           if self.da_loss_fnc_name: 
+              metrics[f"recall_semantic_target/{stage}"] = self.target_recall(x_target, y_target)
+              metrics[f"precision_semantic_target/{stage}"] = self.target_precision(x_target, y_target)
+              metrics[f"loss_semantic_source/{stage}"] = loss_source
+              metrics[f"loss_semantic_target/{stage}"] = loss_target
+              if self.da_loss_fnc_name == "dann":
+                 metrics[f"DA_loss_capped_semantic/{stage}"] = lossDA
+                 metrics[f"DA_loss_uncapped_semantic/{stage}"] = raw_lossDA 
+
         if stage == "train":
-           metrics["temperature/semantic"] = self.source_temp
-            
+           metrics["temperature/semantic"] = self.source_temp            
            if self.da_loss_fnc_name in self.domain_adaptation_classes:
               metrics["temperature/semantic_target"] = self.target_temp
               metrics["temperature/semantic_DA"] = self.da_temp
                 
         if stage in ["val", "test"]:
-           self.source_cm_recall.update(source_x, source_y)
-           self.source_cm_precision.update(source_x, source_y)
-            
+           self.source_cm_recall.update(x_source, y_source)
+           self.source_cm_precision.update(x_source, y_source)
            if self.da_loss_fnc_name in self.domain_adaptation_classes:
-              self.target_cm_recall.update(target_x, target_y)
-              self.target_cm_precision.update(target_x, target_y)
-              self.embeddings.update(source_data[p].x_semantic, source_y, target_data[p].x_semantic, target_y)
+              self.target_cm_recall.update(x_target, y_target)
+              self.target_cm_precision.update(x_target, y_target)
+              self.embeddings.update(source_data["hit"].x_semantic, y_source, target_data["hit"].x_semantic, y_target)
 
         # apply softmax to prediction
-        if self.da_loss_fnc_name == None:
-           source_data["hit"].x_semantic = source_data["hit"].x_semantic.softmax(dim=1)
-        else:
-           for p in self.net:
-               source_data[p].x_semantic = source_data[p].x_semantic.softmax(dim=1)
-               target_data[p].x_semantic = target_data[p].x_semantic.softmax(dim=1)
+        source_data["hit"].x_semantic = source_data["hit"].x_semantic.softmax(dim=1)
+        if self.da_loss_fnc_name in self.domain_adaptation_classes:
+           target_data["hit"].x_semantic = target_data["hit"].x_semantic.softmax(dim=1)
 
         return loss, metrics
 
