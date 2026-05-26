@@ -102,7 +102,6 @@ class SemanticDecoder(nn.Module):
            source_data = data
         else:
            source_data, target_data = data 
-
             
         # run network and add output to graph object      
         def _run_net_and_add_output(data: Any, net: torch.nn.Module, key: str):
@@ -115,15 +114,6 @@ class SemanticDecoder(nn.Module):
         _run_net_and_add_output(source_data, self.net, "hit")
         if self.da_loss_fnc_name in self.domain_adaptation_classes:
            _run_net_and_add_output(target_data, self.net, "hit")
-
-        
-        """ 
-           for p, net in self.net.items():
-               _run_net_and_add_output(source_data, net, p)
-               _run_net_and_add_output(target_data, net, p)
-        else :
-           _run_net_and_add_output(source_data, self.net, "hit")
-        """
 
         # calculate loss
         loss = loss_source = loss_target = lossDA = raw_lossDA = 0

@@ -158,13 +158,13 @@ class EventDecoder(nn.Module):
                
               raw_lossDA = wDA * self.loss_dann(combined_image, combined_label) + self.da_temp 
            elif self.da_loss_fnc_name == "sinkhorn":
-              airwise_distances = torch.cdist(source_data["evt"].x, target_data["evt"].x, p=2)
+              pairwise_distances = torch.cdist(source_data["evt"].x, target_data["evt"].x, p=2)
               flattened_distances = pairwise_distances.view(-1)
               max_distance = torch.max(flattened_distances)
               dynamic_blur_val = 0.05 * max_distance.detach().cpu().numpy()
                
               raw_lossDA = wDA * self.loss_sinkhorn(source_data["evt"].x, 
-                                                    target_data["evt"].x, blur=max(dynamic_blur_val, 0.01)) + self.temp_DA
+                                                    target_data["evt"].x, blur=max(dynamic_blur_val, 0.01)) + self.da_temp
            elif self.da_loss_fnc_name == "mmd":  
               raw_lossDA = wDA * self.loss_mmd(source_data["evt"].x, target_data["evt"].x) + self.da_temp 
            elif self.da_loss_fnc_name == "semantic":
