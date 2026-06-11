@@ -9,7 +9,7 @@
 1. Create nested conda environments using **--stack**
     - This enables creating a based conda environment supporting multiple Nugraph installations
     1. conda create --name=NugraphBase # the Fermilab EAF deploys python 3.10.20
-    2. conda env update --name NugraphBase --file \<Path to yaml file>/nugraph_base.yaml
+    2. conda env update --name NugraphBase --file \<Path to yaml file>/nugraph-base.yaml
     3. conda activate NugraphBase
     4. pip install torch-scatter --no-build-isolation
 1. Create the nested conda environments 
