@@ -5,7 +5,6 @@ import numpy as np
 import torch
 from torch_geometric.data import Data, HeteroData
 
-
 class H5Interface:
     def __init__(self, file: h5py.File):
         self.f = file

@@ -57,7 +57,7 @@ class Encoder(torch.nn.Module):
         """
         
         x_in = self.input_norms[mode](data["hit"].x)
-
+        
         data["hit"].x = self.planar_net(x_in)
         data["hit"].of = self.beta_net(x_in)
         data["hit"].ox = self.coord_net(x_in)
@@ -67,6 +67,7 @@ class Encoder(torch.nn.Module):
         data["evt"].x = torch.zeros(data["evt"].num_nodes,
                                     self.interaction_features,
                                     device=data["hit"].x.device)
+
         
     
     def forward(self, data: Data | list[Data]) -> None:

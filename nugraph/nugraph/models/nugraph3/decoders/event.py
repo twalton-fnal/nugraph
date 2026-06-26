@@ -87,7 +87,7 @@ class EventDecoder(nn.Module):
            self.target_precision = tm.Precision(**metric_args)
            self.target_cm_recall = tm.ConfusionMatrix(normalize="true", **metric_args)
            self.target_cm_precision = tm.ConfusionMatrix(normalize="pred", **metric_args)
-           self.embeddings = CombinedEmbeddingPlot(method="umap") 
+           self.embeddings = CombinedEmbeddingPlot(method="umap",subtitle=self.da_loss_fnc_name) 
         
         # network
         self.net = nn.Linear(in_features=interaction_features,
@@ -254,6 +254,8 @@ class EventDecoder(nn.Module):
         plt.ylim(0, len(self.classes))
         plt.xlabel("Assigned label")
         plt.ylabel("True label")
+        if self.da_loss_fnc_name in self.domain_adaptation_classes:
+           plt.title(f"Domain Adaptation ({self.da_loss_fnc_name.upper()})")
         return fig
 
     

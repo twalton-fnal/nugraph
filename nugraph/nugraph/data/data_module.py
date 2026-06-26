@@ -128,8 +128,8 @@ class NuGraphDataModule(LightningDataModule):
         """
         if self.target_filename:
            self.combined_train = NuGraphCombinedDataset(self.train_dataset, self.train_dataset_target)
-           self.combined_val   = NuGraphCombinedDataset(self.val_dataset, self.train_dataset_target)
-           self.combined_test  = NuGraphCombinedDataset(self.test_dataset, self.train_dataset_target)
+           self.combined_val   = NuGraphCombinedDataset(self.val_dataset, self.val_dataset_target)
+           self.combined_test  = NuGraphCombinedDataset(self.test_dataset, self.test_dataset_target)
 
     @staticmethod
     def generate_samples(data_path: str):

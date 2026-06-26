@@ -166,7 +166,6 @@ class NuGraph3(LightningModule):
            for _ in range(self.num_iters):
                self.core_net(batchA)
 
-    
         # determine if the DA loss function is enabled for a decoder
         enable_da_decoders = []
         for name, decoder in {"event_decoder": getattr(self, "event_decoder", None),
@@ -180,8 +179,11 @@ class NuGraph3(LightningModule):
         total_metrics = {}
         
         for decoder in self.decoders:
-            if enable_da_decoders and decoder in enable_da_decoders:
-               loss, metrics = decoder(data=[batchA, batchB], stage=stage)
+            if len(data) == 2: 
+               if decoder in enable_da_decoders:
+                  loss, metrics = decoder(data=[batchA, batchB], stage=stage)
+               else:
+                   raise ValueError("The decoder [", decoder, "] is not enabled.")
             else:
                loss, metrics = decoder(data=batchA, stage=stage)
             total_loss += loss
@@ -216,11 +218,9 @@ class NuGraph3(LightningModule):
 
             
     def on_train_epoch_end(self) -> None:
-        if self.da_loss_fnc_name == None:
-           # stop updating running average for feature norm
-           self.encoder.input_norm.update = False
-        else:
-           print("\n Finished training epoch")        
+        # stop updating running average for feature norm
+        self.encoder.input_norms.update = False
+        print("\n Finished training epoch")        
 
         
     def training_step(self,
@@ -279,11 +279,15 @@ class NuGraph3(LightningModule):
     def configure_optimizers(self) -> tuple:
         optimizer = AdamW(self.parameters(),
                           lr=self.lr)
+        """
         onecycle = OneCycleLR(
                 optimizer,
                 max_lr=self.lr,
                 total_steps=self.trainer.estimated_stepping_batches)
         return [optimizer], {'scheduler': onecycle, 'interval': 'step'}
+        """
+        
+        return optimizer
 
     def on_after_optimizer_step(self, optimizer: torch.optim.Optimizer) -> None:
         """Clamps eta_s, eta_t, eta_da after each optimizer step."""

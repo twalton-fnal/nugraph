@@ -51,7 +51,7 @@ class CombinedEmbeddingPlot:
     """
 
     
-    def __init__(self, n_neighbors=10, n_components=2, method='isomap'):
+    def __init__(self, n_neighbors=10, n_components=2, method='isomap', subtitle=''):
         self.n_neighbors = n_neighbors
         self.n_components = n_components
         self.dataset1 = []
@@ -59,6 +59,7 @@ class CombinedEmbeddingPlot:
         self.dataset2 = []
         self.labels2 = []
         self.method = method.lower()
+        self.loss_name = subtitle.upper()
 
     def update(self, x1, y1, x2, y2):
         self.dataset1.append(x1.cpu().detach())
@@ -140,10 +141,10 @@ class CombinedEmbeddingPlot:
             )
 
         ax.legend(fontsize=12, loc='upper right', bbox_to_anchor=(1, 1), framealpha=1.0)
-        title = f"{self.method.upper()} Embeddings of Source and Target Datasets"
+        title = f"{self.method.upper()} DA-{self.loss_name} Embeddings of Source and Target Datasets"
         if epoch is not None:
             title += f" (Epoch {epoch})"
-        ax.set_title(title, fontsize=16)
+        ax.set_title(title, fontsize=14)
 
         plt.close(fig)
         return fig
