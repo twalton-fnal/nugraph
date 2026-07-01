@@ -12,6 +12,9 @@ from pytorch_lightning.loggers import Logger
 
 from ....util import ConfusionMatrixLogger, RecallLoss
 from ....util.DANNLoss import ReverseLayerF
+from ....util.MMDLoss import MMDLoss
+from ....util.SemanticLoss import SemanticAlignmentLoss
+from ....util.SinkhornLoss import Sinkhorn
 from ....util.EmbeddingPlotter import CombinedEmbeddingPlot
 from ..types import Data
 
@@ -19,12 +22,13 @@ class SemanticDecoder(nn.Module):
     """
     NuGraph3 semantic decoder module
 
-    Convolve the planar node embedding down to a set of categorical scores for
+    Convolves the planar node embedding down to a set of categorical scores for
     each semantic class.
 
-    Includes the following:
-       Domain Adversarial Neural Network (DANN) loss on planar node embedding 
-       to align them across the source and target datasets and improve classification. 
+    The implemented DA loss functions are:
+    - Domain-Adversarial Neural Networks (DANN)
+    - Maximum Mean Discrepancy (MMD)
+    - Semantic alignement loss (semantic)
 
     Args:
         hit_features: Number of planar hit node features
@@ -49,7 +53,17 @@ class SemanticDecoder(nn.Module):
         if self.da_loss_fnc_name == "dann":
            self.loss_dann = nn.CrossEntropyLoss()  
            loss_dann = torch.tensor(0.0)    
-
+        elif self.da_loss_fnc_name == "mmd":
+           self.loss_mmd = MMDLoss()  
+           loss_mmd = torch.tensor(0.0)
+        elif self.da_loss_fnc_name == "semantic":
+           semantic_metric = "cosine" #or metric='euclidean' 
+           self.loss_semantic = SemanticAlignmentLoss(semantic_metric)
+           semantic = torch.tensor(0.0) 
+        elif self.da_loss_fnc_name == "sinkhorn":
+           self.loss_sinkhorn = Sinkhorn(blur=0.05)
+           sinkhorn = torch.tensor(0.0) 
+        
         # temperature parameter
         self.source_temp = nn.Parameter(torch.tensor(0.))
         if self.da_loss_fnc_name in self.domain_adaptation_classes: 
@@ -83,9 +97,14 @@ class SemanticDecoder(nn.Module):
 
         # Domain classifier network for DANN
         if self.da_loss_fnc_name == "dann":
-           self.domain_net = nn.Linear(in_features=hit_features,
-                                       out_features=2)
+           self.domain_net = nn.Sequential(
+                                  nn.Linear(in_features=5,out_features=64),
+                                  nn.ReLU(),
+                                  nn.Linear(in_features=64,out_features=2)
+           )  
            self.domain_classes = ['source', 'target']
+
+        
 
     
     def forward(self, data: Data | list[Data], stage: str = None) -> dict[str, Any]:
@@ -140,48 +159,57 @@ class SemanticDecoder(nn.Module):
             DA loss is also capped at most 1/4 of the loss_source (to be on the safe side). 
         """
         if self.use_domain_adaptation:
-           # Domain Classification
-           alpha = 1
-           xSS_list, xTT_list = [], []
-
-           for p in self.net:
-               reversed_S = ReverseLayerF.apply(source_data[p].x_semantic, alpha)
-               xSS = self.domain_net(reversed_S)
-               xSS_list.append(xSS)
-        
-               reversed_T = ReverseLayerF.apply(target_data[p].x_semantic, alpha)
-               xTT = self.domain_net(reversed_T)
-               xTT_list.append(xTT)
-
-           #combine all planes, i.e., there is only one adversarial branch for combined semantic features
-           xSS_all = torch.cat(xSS_list, dim=0)  
-           xTT_all = torch.cat(xTT_list, dim=0)
-        
-           ySS = torch.zeros(xSS_all.shape[0], dtype=torch.long, device=xSS_all.device)
-           yTT = torch.ones(xTT_all.shape[0], dtype=torch.long, device=xTT_all.device)
-        
-           combined_image = torch.cat((xSS_all, xTT_all), dim=0)  
-           combined_label = torch.cat((ySS, yTT), dim=0)
-        
            wDA = 2 * (-1 * self.da_temp).exp()
-           raw_lossDA = wDA * self.loss_dann(combined_image, combined_label) + self.da_temp
+            
+           if self.da_loss_fnc_name == "dann":    
+              alpha = 1
+               
+              reversed_S = ReverseLayerF.apply(source_data["hit"].x_semantic, alpha)
+              xSS = self.domain_net(reversed_S)
+              ySS = torch.zeros(xSS.shape[0], dtype=torch.long, device=xSS.device)
+            
+              reversed_T = ReverseLayerF.apply(target_data["hit"].x_semantic, alpha)
+              xTT = self.domain_net(reversed_T) 
+              yTT = torch.ones(xTT.shape[0], dtype=torch.long, device=xTT.device)    
 
-           # Smooth capping of the DA based on the source semantic loss value (currently to be at most 1/4 of the event loss value)
-           sharp = 20.0  # sharpness of transition when source semantic loss goes from positive to negative
+              combined_image = torch.cat((xSS, xTT), dim=0)  
+              combined_label = torch.cat((ySS, yTT), dim=0)
+
+              wDA = 2 * (-1 * self.da_temp).exp()
+              raw_lossDA = wDA * self.loss_dann(combined_image, combined_label) + self.da_temp
+
+           elif self.da_loss_fnc_name == "mmd":
+                raw_lossDA = wDA * self.loss_mmd(source_data["hit"].x_semantic, target_data["hit"].x_semantic) + self.da_temp
+           elif self.da_loss_fnc_name == "semantic":
+                raw_lossDA = self.loss_semantic(source_data["hit"].x_semantic, y_source, target_data["hit"].x_semantic, y_target) 
+           elif self.da_loss_fnc_name == "sinkhorn":
+                pairwise_distances = torch.cdist(source_data["hit"].x_semantic, target_data["hit"].x_semantic, p=2)
+                flattened_distances = pairwise_distances.view(-1)
+                max_distance = torch.max(flattened_distances)
+                dynamic_blur_val = 0.05 * max_distance.detach().cpu().numpy()
+                raw_lossDA = wDA * self.loss_sinkhorn(source_data["hit"].x_semantic, 
+                                                      target_data["hit"].x_semantic, blur=max(dynamic_blur_val, 0.01)) + self.da_temp 
+           else:
+              sys.exit( f"The function {self.da_loss_fnc_name} does not exist." )
+   
+
+           """  
+           Smooth capping of the DA based on the source semantic loss value 
+           (currently to be at most 1/4 of the event loss value)
+           sharpness of transition when source semantic loss goes from positive to negative
+           """            
+           sharp = 20.0  
            sig = torch.sigmoid(sharp * loss_source)
            max_lossDA = sig * (loss_source / 4) + (1 - sig) * (4 * loss_source)
            lossDA = torch.min(raw_lossDA, max_lossDA)
-
-           # Total loss
-           loss = loss_source + loss_target + lossDA
-
-        else:
-            loss = loss_source + loss_target
+   
+        # total loss
+        loss = loss_source + loss_target + lossDA
             
         # calculate metrics
         metrics = {}
 
-        name = "_source/" if self.da_loss_fnc_name else "/"
+        name = "_source_%s/" % self.da_loss_fnc_name if self.da_loss_fnc_name else "/"
         if stage:
            metrics[f"loss_semantic{name}{stage}"] = loss
            metrics[f"recall_semantic{name}{stage}"] = self.source_recall(x_source, y_source)
@@ -234,6 +262,8 @@ class SemanticDecoder(nn.Module):
         plt.ylim(0, len(self.classes))
         plt.xlabel("Assigned label")
         plt.ylabel("True label")
+        if self.da_loss_fnc_name in self.domain_adaptation_classes:
+           plt.title(f"Domain Adaptation ({self.da_loss_fnc_name.upper()})")
         return fig
 
         

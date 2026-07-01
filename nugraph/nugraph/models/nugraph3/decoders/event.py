@@ -25,8 +25,8 @@ class EventDecoder(nn.Module):
     to enable the Domain Adaptation (DA) on event-level features
 
     The implemented DA loss functions are:
-    - Domain-Adversarial Neural Networks (dann)
-    - Maximum Mean Discrepancy (mmd)
+    - Domain-Adversarial Neural Networks (DANN)
+    - Maximum Mean Discrepancy (MMD)
     - Semantic loss (semantic)
     - Sinkhorn loss (sinkhorn)
 

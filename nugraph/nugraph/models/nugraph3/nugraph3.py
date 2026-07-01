@@ -209,12 +209,8 @@ class NuGraph3(LightningModule):
                   continue
 
                if not decoder.use_domain_adaptation:
-                  if name == "semantic_decoder":
-                     print(f"[Epoch {epoch}] DA is manually disabled for {name} — will not enable DA")
-                     decoder.use_domain_adaptation = False
-                  else:
-                     print(f"[Epoch {epoch}] Enabling DA for {name}") 
-                     decoder.use_domain_adaptation = True
+                  print(f"[Epoch {epoch}] Enabling DA for {name}") 
+                  decoder.use_domain_adaptation = True
 
             
     def on_train_epoch_end(self) -> None:
