@@ -28,7 +28,8 @@ class SemanticDecoder(nn.Module):
     The implemented DA loss functions are:
     - Domain-Adversarial Neural Networks (DANN)
     - Maximum Mean Discrepancy (MMD)
-    - Semantic alignement loss (semantic)
+    - Semantic alignment loss (semantic)
+    - Sinkhorn loss (sinkhorn)
 
     Args:
         hit_features: Number of planar hit node features
@@ -96,7 +97,7 @@ class SemanticDecoder(nn.Module):
         self.classes = semantic_classes
 
         # Domain classifier network for DANN
-        if self.da_loss_fnc_name == "dann":
+        if self.da_loss_fnc_name == "dann":  
            self.domain_net = nn.Sequential(
                                   nn.Linear(in_features=5,out_features=64),
                                   nn.ReLU(),
@@ -135,7 +136,7 @@ class SemanticDecoder(nn.Module):
            _run_net_and_add_output(target_data, self.net, "hit")
 
         # calculate loss
-        loss = loss_source = loss_target = lossDA = raw_lossDA = 0
+        loss = loss_source = loss_target = lossDA = loss_func = raw_lossDA = 0
     
         x_source = source_data["hit"].x_semantic
         y_source = source_data["hit"].y_semantic
@@ -175,8 +176,8 @@ class SemanticDecoder(nn.Module):
               combined_image = torch.cat((xSS, xTT), dim=0)  
               combined_label = torch.cat((ySS, yTT), dim=0)
 
-              wDA = 2 * (-1 * self.da_temp).exp()
-              raw_lossDA = wDA * self.loss_dann(combined_image, combined_label) + self.da_temp
+              loss_func = self.loss_dann(combined_image, combined_label)
+              raw_lossDA = wDA * loss_func + self.da_temp
 
            elif self.da_loss_fnc_name == "mmd":
                 raw_lossDA = wDA * self.loss_mmd(source_data["hit"].x_semantic, target_data["hit"].x_semantic) + self.da_temp
@@ -197,11 +198,17 @@ class SemanticDecoder(nn.Module):
            Smooth capping of the DA based on the source semantic loss value 
            (currently to be at most 1/4 of the event loss value)
            sharpness of transition when source semantic loss goes from positive to negative
-           """            
+           """  
+           """ 
+             Use the temperature scaling to calculate the DA loss 
+             Therefore, turn off the capping method for the DA loss
+             
            sharp = 20.0  
            sig = torch.sigmoid(sharp * loss_source)
            max_lossDA = sig * (loss_source / 4) + (1 - sig) * (4 * loss_source)
            lossDA = torch.min(raw_lossDA, max_lossDA)
+           """
+           lossDA = raw_lossDA
    
         # total loss
         loss = loss_source + loss_target + lossDA
@@ -209,25 +216,27 @@ class SemanticDecoder(nn.Module):
         # calculate metrics
         metrics = {}
 
-        name = "_source_%s/" % self.da_loss_fnc_name if self.da_loss_fnc_name else "/"
         if stage:
-           metrics[f"loss_semantic{name}{stage}"] = loss
-           metrics[f"recall_semantic{name}{stage}"] = self.source_recall(x_source, y_source)
-           metrics[f"precision_semantic{name}{stage}"] = self.source_precision(x_source, y_source)
+           name = "_source_da_%s/" % self.da_loss_fnc_name if self.da_loss_fnc_name else "/" 
+           metrics[f"semantic/loss_total/{stage}"] = loss
+           metrics[f"semantic/recall{name}{stage}"] = self.source_recall(x_source, y_source)
+           metrics[f"semantic/precision{name}{stage}"] = self.source_precision(x_source, y_source)
            if self.da_loss_fnc_name: 
-              metrics[f"recall_semantic_target/{stage}"] = self.target_recall(x_target, y_target)
-              metrics[f"precision_semantic_target/{stage}"] = self.target_precision(x_target, y_target)
-              metrics[f"loss_semantic_source/{stage}"] = loss_source
-              metrics[f"loss_semantic_target/{stage}"] = loss_target
-              if self.da_loss_fnc_name == "dann":
-                 metrics[f"DA_loss_capped_semantic/{stage}"] = lossDA
-                 metrics[f"DA_loss_uncapped_semantic/{stage}"] = raw_lossDA 
+              name = "_da_%s/" % self.da_loss_fnc_name  
+              metrics[f"semantic/recall_target{name}{stage}"] = self.target_recall(x_target, y_target)
+              metrics[f"semantic/precision_target{name}{stage}"] = self.target_precision(x_target, y_target)
+              metrics[f"semantic/loss_source{name}{stage}"] = loss_source
+              metrics[f"semantic/loss_target{name}{stage}"] = loss_target
+              if self.use_domain_adaptation:
+                 metrics[f"semantic/loss_temp_scaled{name}{stage}"] = lossDA
+                 metrics[f"semantic/loss_function{name}{stage}"] = loss_func 
 
         if stage == "train":
-           metrics["temperature/semantic"] = self.source_temp            
-           if self.da_loss_fnc_name in self.domain_adaptation_classes:
-              metrics["temperature/semantic_target"] = self.target_temp
-              metrics["temperature/semantic_DA"] = self.da_temp
+           name = "temp_source" if self.da_loss_fnc_name else "temperature" 
+           metrics[f"semantic/{name}"] = self.source_temp
+           if self.da_loss_fnc_name:             
+              metrics["semantic/temp_target"] = self.target_temp
+              metrics[f"semantic/temp_da_{self.da_loss_fnc_name}"] = self.da_temp
                 
         if stage in ["val", "test"]:
            self.source_cm_recall.update(x_source, y_source)
@@ -282,27 +291,27 @@ class SemanticDecoder(nn.Module):
             return
 
         if self.da_loss_fnc_name == None:
-           self.cm_logger.log(f"semantic/recall-matrix-{stage}",
+           self.cm_logger.log(f"semantic/recall_matrix/{stage}",
                                 self.source_cm_recall, logger, epoch)
-           self.cm_logger.log(f"semantic/precision-matrix-{stage}",
+           self.cm_logger.log(f"semantic/precision_matrix/{stage}",
                                 self.source_cm_precision, logger, epoch)
         else:
-           logger.experiment.add_figure(f"recall_semantic_matrix_source/{stage}",
+           logger.experiment.add_figure(f"semantic/recall_matrix_source/{stage}",
                                      self.draw_confusion_matrix(self.source_cm_recall),
                                      global_step=epoch)
            self.source_cm_recall.reset()
 
-           logger.experiment.add_figure(f"recall_semantic_matrix_target/{stage}",
+           logger.experiment.add_figure(f"semantic/recall_matrix_target/{stage}",
                                      self.draw_confusion_matrix(self.target_cm_recall),
                                      global_step=epoch)
            self.target_cm_recall.reset()
 
-           logger.experiment.add_figure(f"precision_semantic_matrix_source/{stage}",
+           logger.experiment.add_figure(f"semantic/precision_matrix_source/{stage}",
                                 self.draw_confusion_matrix(self.source_cm_precision),
                                 global_step=epoch)
            self.source_cm_precision.reset()
 
-           logger.experiment.add_figure(f"precision_semantic_matrix_target/{stage}",
+           logger.experiment.add_figure(f"semantic/precision_matrix_target/{stage}",
                                 self.draw_confusion_matrix(self.target_cm_precision),
                                 global_step=epoch)
            self.target_cm_precision.reset()
@@ -313,6 +322,6 @@ class SemanticDecoder(nn.Module):
            dat2sub, lab2sub = self.embeddings.subsample(dat2, lab2, max_samples=1000)
         
            embeddings_fig = self.embeddings.plot_combined(dat1sub, lab1sub, dat2sub, lab2sub, epoch=epoch, class_names=self.semantic_classes)
-           logger.experiment.add_figure(f"Embeddings semantic/{stage}",
+           logger.experiment.add_figure(f"Embeddings Semantic Decoder/{stage}",
                                      embeddings_fig, global_step=epoch)
            self.embeddings.reset()

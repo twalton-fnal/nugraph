@@ -205,11 +205,11 @@ class NuGraph3(LightningModule):
                   continue
 
                if epoch < getattr(decoder, "warmup_epochs", 0):
-                  print(f"[Epoch {epoch}] DA is OFF for {name} (warmup phase)")
+                  print(f"[Epoch {epoch}] and the DA is OFF for {name} (warmup phase)")
                   continue
 
                if not decoder.use_domain_adaptation:
-                  print(f"[Epoch {epoch}] Enabling DA for {name}") 
+                  print(f"[Epoch {epoch}] and Enabling DA for {name}") 
                   decoder.use_domain_adaptation = True
 
             

@@ -87,7 +87,9 @@ class EventDecoder(nn.Module):
            self.target_precision = tm.Precision(**metric_args)
            self.target_cm_recall = tm.ConfusionMatrix(normalize="true", **metric_args)
            self.target_cm_precision = tm.ConfusionMatrix(normalize="pred", **metric_args)
-           self.embeddings = CombinedEmbeddingPlot(method="umap",subtitle=self.da_loss_fnc_name) 
+            
+           subtitle_label = self.da_loss_fnc_name if self.use_domain_adaptation else "off"
+           self.embeddings = CombinedEmbeddingPlot(method="umap",subtitle=subtitle_label) 
         
         # network
         self.net = nn.Linear(in_features=interaction_features,
@@ -118,7 +120,7 @@ class EventDecoder(nn.Module):
            source_data, target_data = data 
 
         # run network and calculate loss
-        loss = loss_source = loss_target = lossDA = raw_lossDA = 0
+        loss = loss_source = loss_target = lossDA = loss_func = raw_lossDA = 0
         
         x_source = self.net(source_data["evt"].x)
         y_source = source_data["evt"].y
@@ -145,18 +147,21 @@ class EventDecoder(nn.Module):
             
            if self.da_loss_fnc_name == "dann":  
               alpha = 1   # Weight of DA is handeled by weight wDA so alpha=1 inside of the gradient reversal layer
+              
               reversed_S = ReverseLayerF.apply(source_data["evt"].x, alpha)
               xSS = self.domain_net(reversed_S)
-              ySS = torch.zeros(xSS.shape[0]).type(torch.LongTensor)
+              ySS = torch.zeros(xSS.shape[0], dtype=torch.long, device=xSS.device)  
     
               reversed_T = ReverseLayerF.apply(target_data["evt"].x, alpha)
               xTT = self.domain_net(reversed_T)
-              yTT = torch.ones(xTT.shape[0]).type(torch.LongTensor)
+              yTT = torch.ones(xTT.shape[0], dtype=torch.long, device=xTT.device)   
     
-              combined_image = torch.cat((xSS, xTT), 0).cuda()
-              combined_label = torch.cat((ySS, yTT), 0).cuda()
+              combined_image = torch.cat((xSS, xTT), dim=0)  
+              combined_label = torch.cat((ySS, yTT), dim=0)
                
-              raw_lossDA = wDA * self.loss_dann(combined_image, combined_label) + self.da_temp 
+              loss_func = self.loss_dann(combined_image, combined_label)
+              raw_lossDA = wDA * loss_func + self.da_temp 
+              
            elif self.da_loss_fnc_name == "sinkhorn":
               pairwise_distances = torch.cdist(source_data["evt"].x, target_data["evt"].x, p=2)
               flattened_distances = pairwise_distances.view(-1)
@@ -178,10 +183,16 @@ class EventDecoder(nn.Module):
              The "sharp" variable is the sharpness of the transition when the 
              source event loss goes from positive to negative
            """
+           """ 
+             Use the temperature scaling to calculate the DA loss 
+             Therefore, turn off the capping method for the DA loss
+             
            sharp = 20.0  
            sig = torch.sigmoid(sharp * loss_source)
            max_lossDA = sig * (loss_source / 4) + (1 - sig) * (4 * loss_source)
-           lossDA = torch.min(raw_lossDA, max_lossDA)           
+           lossDA = torch.min(raw_lossDA, max_lossDA)
+           """
+           lossDA = raw_lossDA
             
         # total loss
         loss = loss_source + loss_target + lossDA
@@ -189,27 +200,27 @@ class EventDecoder(nn.Module):
         # calculate metrics
         metrics = {}
         
-        name = "_source_%s/" % self.da_loss_fnc_name if self.da_loss_fnc_name else "/"
         if stage:
-           metrics[f"loss_event{name}{stage}"] = loss
-           metrics[f"recall_event{name}{stage}"] = self.source_recall(x_source, y_source)
-           metrics[f"precision_event{name}{stage}"] = self.source_precision(x_source, y_source)
+           name = "_source_da_%s_" % self.da_loss_fnc_name if self.da_loss_fnc_name else "_" 
+           metrics[f"event/loss_total_{stage}"] = loss
+           metrics[f"event/recall{name}{stage}"] = self.source_recall(x_source, y_source)
+           metrics[f"event/precision{name}{stage}"] = self.source_precision(x_source, y_source)
            if self.da_loss_fnc_name: 
-              name = "_%s/" % self.da_loss_fnc_name  
-              metrics[f"recall_event_target{name}{stage}"] = self.target_recall(x_target, y_target)
-              metrics[f"precision_event_target{name}{stage}"] = self.target_precision(x_target, y_target)
-              metrics[f"loss_event_source{name}{stage}"] = loss_source
-              metrics[f"loss_event_target{name}{stage}"] = loss_target
+              name = "_da_%s_" % self.da_loss_fnc_name  
+              metrics[f"event/recall_target{name}{stage}"] = self.target_recall(x_target, y_target)
+              metrics[f"event/precision_target{name}{stage}"] = self.target_precision(x_target, y_target)
+              metrics[f"event/loss_source{name}{stage}"] = loss_source
+              metrics[f"event/loss_target{name}{stage}"] = loss_target
               if self.use_domain_adaptation:
-                 metrics[f"DA_loss_capped_event{name}{stage}"] = lossDA
-                 metrics[f"DA_loss_uncapped_event{name}{stage}"] = raw_lossDA 
+                 metrics[f"event/loss_temp_scaled{name}{stage}"] = lossDA
+                 metrics[f"event/loss_{name}{stage}"] = loss_func 
 
-        name = "event_source" if self.da_loss_fnc_name else "event"
         if stage == "train":
-           metrics[f"temperature/{name}"] = self.source_temp
+           name = "temp_source" if self.da_loss_fnc_name else "temperature" 
+           metrics[f"event/{name}"] = self.source_temp
            if self.da_loss_fnc_name:             
-              metrics["temperature/event_target"] = self.target_temp
-              metrics["temperature/event_DA"] = self.da_temp
+              metrics["event/temp_target"] = self.target_temp
+              metrics[f"event/temp_da_{self.da_loss_fnc_name}"] = self.da_temp
             
         if stage in ["val", "test"]:
             self.source_cm_recall.update(x_source, y_source)
@@ -271,28 +282,28 @@ class EventDecoder(nn.Module):
         """
 
         if self.da_loss_fnc_name == None:        
-           self.cm_logger.log(f"event/recall-matrix-{stage}",
+           self.cm_logger.log(f"event/recall_matrix_{stage}",
                               self.source_cm_recall, logger, epoch)
-           self.cm_logger.log(f"event/precision-matrix-{stage}",
+           self.cm_logger.log(f"event/precision_matrix_{stage}",
                               self.source_cm_precision, logger, epoch)
             
         else:
-           logger.experiment.add_figure(f"recall_event_matrix_source/{stage}",
+           logger.experiment.add_figure(f"event/recall_matrix_source_{stage}",
                                         self.draw_confusion_matrix(self.source_cm_recall),
                                         global_step=epoch)
            self.source_cm_recall.reset()
 
-           logger.experiment.add_figure(f"recall_event_matrix_target/{stage}",
+           logger.experiment.add_figure(f"event/recall_matrix_target_{stage}",
                                         self.draw_confusion_matrix(self.target_cm_recall),
                                         global_step=epoch)
            self.target_cm_recall.reset()
 
-           logger.experiment.add_figure(f"precision_event_matrix_source/{stage}",
+           logger.experiment.add_figure(f"event/precision_matrix_source_{stage}",
                                         self.draw_confusion_matrix(self.source_cm_precision),
                                         global_step=epoch)
            self.source_cm_precision.reset()
 
-           logger.experiment.add_figure(f"precision_event_matrix_target/{stage}",
+           logger.experiment.add_figure(f"event/precision_matrix_target_{stage}",
                                         self.draw_confusion_matrix(self.target_cm_precision),
                                         global_step=epoch)
            self.target_cm_precision.reset()
@@ -304,6 +315,6 @@ class EventDecoder(nn.Module):
         
            embeddings_fig = self.embeddings.plot_combined(dat1sub, lab1sub, dat2sub, lab2sub, 
                                                           epoch=epoch, class_names=self.classes)
-           logger.experiment.add_figure(f"Embeddings event/{stage}",
+           logger.experiment.add_figure(f"event/embeddings_{stage}",
                                         embeddings_fig, global_step=epoch)
            self.embeddings.reset()
