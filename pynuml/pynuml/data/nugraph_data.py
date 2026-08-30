@@ -26,7 +26,7 @@ class NuGraphData(HeteroData):
 
     def x_i(self) -> torch.Tensor:
         """Return predicted instance labels on hits"""
-        x_i = torch.empty_like(self["hit"].y_semantic).fill_(-1)
+        x_i = torch.empty_like(self["hit"].y_semantic).fill_(-1)         
         i, j = self[E_H_IP].edge_index
         x_i[i] = j
         return x_i

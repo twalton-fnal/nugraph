@@ -83,7 +83,7 @@ class NuGraph3(LightningModule):
         self.num_iters = num_iters
         self.lr = lr
         self.warmup_epochs = warmup_epochs
-
+        
         self.da_loss_fnc_name = da_loss_fnc_name
         self.domain_adaptation_classes = [ "dann", "mmd", "semantic", "sinkhorn" ]
 
@@ -134,6 +134,7 @@ class NuGraph3(LightningModule):
         self.max_mem_cpu = 0.
         self.max_mem_gpu = 0.    
 
+            
     def forward(self, data: Data | list[Data], stage: str = None): # pylint: disable=arguments-differ
         """
         NuGraph3 forward function
@@ -146,6 +147,8 @@ class NuGraph3(LightningModule):
             data: Graph data object
             stage: String tag defining the step type
         """
+
+        print("self.da_loss_fnc_name", self.da_loss_fnc_name)
         
         # Check if the input is a list of two batches
         batchA = data

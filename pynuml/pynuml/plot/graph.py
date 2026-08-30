@@ -29,6 +29,7 @@ class GraphPlot:
     def to_dataframe(self, data: HeteroData):
         def to_categorical(arr):
             return pd.Categorical.from_codes(codes=arr+1, dtype=self._labels)
+            
         if isinstance(data, Batch):
             raise RuntimeError('to_dataframe does not support batches!')
 
@@ -36,19 +37,24 @@ class GraphPlot:
         df = pd.DataFrame(hit["id"], columns=["id"])
         df["plane"] = [self._planes[i] for i in hit["plane"]]
         df[["proj", "drift"]] = hit["pos"]
+        
         if "y_position" in hit:
             df[[f"y_position_{c}" for c in C_3D]] = hit["y_position"]
         if "x_position" in hit:
             df[[f"x_position_{c}" for c in C_3D]] = hit["x_position"]
+  
         df["y_filter"] = hit["y_semantic"] != -1
         df['y_semantic'] = to_categorical(hit['y_semantic'])
-        df['y_instance'] = data.y_i().numpy().astype(str)
+        if hasattr(data, 'edge_index'):
+           df['y_instance'] = data.y_i().numpy().astype(str)
 
+        
         # add detailed truth information if it's available
         for col in self._truth_cols:
             if col in hit.keys():
                 df[col] = hit[col].numpy()
 
+        
         # add model prediction if it's available
         if 'x_semantic' in hit.keys():
             df['x_semantic'] = to_categorical(hit['x_semantic'].argmax(dim=-1).detach())
@@ -56,7 +62,9 @@ class GraphPlot:
         if 'x_filter' in hit.keys():
             df['x_filter'] = hit['x_filter'].detach()
         if "ox" in hit.keys():
-            df["i"] = data.x_i().numpy().astype(str)
+            if hasattr(data, 'edge_index'):
+               df["i"] = data.x_i().numpy().astype(str)
+    
 
         # add object condensation embedding
         if "ox" in hit.keys():
@@ -224,6 +232,10 @@ class GraphPlot:
             'y_semantic': 'semantic truth',
             'y_instance': 'instance truth',
         }
+
+    
+        print( "DF", df )
+        
         if 'x_filter' in df:
             opts['hover_data']['x_filter'] = True
             opts['labels']['x_filter'] = 'filter prediction'
@@ -236,6 +248,7 @@ class GraphPlot:
         for col in self._truth_cols:
             if col in df:
                 opts['hover_data'][col] = True
+        
 
         if xyz:
             fig = px.scatter_3d(df, width=width, height=height, **opts)

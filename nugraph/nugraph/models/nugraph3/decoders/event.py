@@ -22,7 +22,7 @@ from ....util.EmbeddingPlotter import CombinedEmbeddingPlot
 class EventDecoder(nn.Module):
     """
     NuGraph3 event decoder module, which includes the option
-    to enable the Domain Adaptation (DA) on event-level features
+    to enable Domain Adaptation (DA) on event-level features
 
     The implemented DA loss functions are:
     - Domain-Adversarial Neural Networks (DANN)
@@ -213,7 +213,7 @@ class EventDecoder(nn.Module):
               metrics[f"event/loss_target{name}{stage}"] = loss_target
               if self.use_domain_adaptation:
                  metrics[f"event/loss_temp_scaled{name}{stage}"] = lossDA
-                 metrics[f"event/loss_{name}{stage}"] = loss_func 
+                 metrics[f"event/loss_func{name}{stage}"] = loss_func 
 
         if stage == "train":
            name = "temp_source" if self.da_loss_fnc_name else "temperature" 
