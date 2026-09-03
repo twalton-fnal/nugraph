@@ -103,16 +103,21 @@ class NuGraph3(LightningModule):
             self.event_decoder = EventDecoder(interaction_features, event_classes, 
                                               da_loss_fnc_name=self.da_loss_fnc_name, 
                                               warmup_epochs=self.warmup_epochs)
+            self.event_decoder.use_da_after_warmups = True
             self.decoders.append(self.event_decoder)
 
         if semantic_head:
             self.semantic_decoder = SemanticDecoder(hit_features, semantic_classes, 
                                                     da_loss_fnc_name=self.da_loss_fnc_name, 
                                                     warmup_epochs=self.warmup_epochs)
+            self.semantic_decoder.use_da_after_warmups = False
             self.decoders.append(self.semantic_decoder)
 
         if filter_head:
-            self.filter_decoder = FilterDecoder(hit_features,)
+            self.filter_decoder = FilterDecoder(hit_features,
+                                                da_loss_fnc_name=self.da_loss_fnc_name, 
+                                                warmup_epochs=self.warmup_epochs)
+            self.filter_decoder.use_da_after_warmups = False
             self.decoders.append(self.filter_decoder)
 
         if vertex_head:
@@ -147,8 +152,6 @@ class NuGraph3(LightningModule):
             data: Graph data object
             stage: String tag defining the step type
         """
-
-        print("self.da_loss_fnc_name", self.da_loss_fnc_name)
         
         # Check if the input is a list of two batches
         batchA = data
@@ -172,7 +175,8 @@ class NuGraph3(LightningModule):
         # determine if the DA loss function is enabled for a decoder
         enable_da_decoders = []
         for name, decoder in {"event_decoder": getattr(self, "event_decoder", None),
-                              "semantic_decoder": getattr(self, "semantic_decoder", None)
+                              "semantic_decoder": getattr(self, "semantic_decoder", None),
+                              "filter_decoder": getattr(self, "filter_decoder", None)
                              }.items():
             if decoder and hasattr(decoder, "use_domain_adaptation"):
                enable_da_decoders.append( decoder )
@@ -197,12 +201,13 @@ class NuGraph3(LightningModule):
     
     def on_train_epoch_start(self) -> None:
         if self.da_loss_fnc_name == None:
-           print("\nEnter training epoch")
+           print("Enter training epoch")
         else:
            """ Check and toggle DA for event_decoder and semantic_decoder"""  
            epoch = self.trainer.current_epoch
            for name, decoder in {"event_decoder": getattr(self, "event_decoder", None),
-                                 "semantic_decoder": getattr(self, "semantic_decoder", None)
+                                 "semantic_decoder": getattr(self, "semantic_decoder", None),
+                                 "filter_decoder": getattr(self, "filter_decoder", None)
                                 }.items():
                if decoder is None or not hasattr(decoder, "use_domain_adaptation"):
                   continue
@@ -212,14 +217,15 @@ class NuGraph3(LightningModule):
                   continue
 
                if not decoder.use_domain_adaptation:
-                  print(f"[Epoch {epoch}] and Enabling DA for {name}") 
-                  decoder.use_domain_adaptation = True
+                  if decoder.use_da_after_warmups:
+                     print(f"[Epoch {epoch}] and Enabling DA for {name}") 
+                     decoder.use_domain_adaptation = True
 
             
     def on_train_epoch_end(self) -> None:
         # stop updating running average for feature norm
         self.encoder.input_norms.update = False
-        print("\n Finished training epoch")        
+        print("Finished training epoch")        
 
         
     def training_step(self,
@@ -237,7 +243,7 @@ class NuGraph3(LightningModule):
 
     def on_validation_epoch_end(self) -> None:
         epoch = self.trainer.current_epoch + 1
-        print("\n Validation epoch ended!")
+        print("Validation epoch ended!")
         for decoder in self.decoders:
             decoder.on_epoch_end(self.logger, 'val', epoch)    
     

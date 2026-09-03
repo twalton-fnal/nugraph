@@ -45,6 +45,7 @@ class SemanticDecoder(nn.Module):
 
         self.semantic_classes = semantic_classes
         self.warmup_epochs = warmup_epochs
+        self.use_da_after_warmups = False
         self.da_loss_fnc_name = da_loss_fnc_name
         self.use_domain_adaptation = False 
         self.domain_adaptation_classes = [ "dann", "mmd", "semantic", "sinkhorn" ]
@@ -72,6 +73,8 @@ class SemanticDecoder(nn.Module):
            self.da_temp = nn.Parameter(torch.tensor(0.))
 
         # metrics
+        self.classes = semantic_classes
+
         metric_args = {
             "task": "multiclass",
             "num_classes": len(semantic_classes),
@@ -82,7 +85,7 @@ class SemanticDecoder(nn.Module):
         self.source_precision = tm.Precision(**metric_args)
         self.source_cm_recall = tm.ConfusionMatrix(normalize="true", **metric_args)
         self.source_cm_precision = tm.ConfusionMatrix(normalize="pred", **metric_args)
-        self.cm_logger = ConfusionMatrixLogger(semantic_classes)
+        self.cm_logger = ConfusionMatrixLogger(self.classes)
 
         if self.da_loss_fnc_name in self.domain_adaptation_classes:
            self.target_recall = tm.Recall(**metric_args)
@@ -93,9 +96,7 @@ class SemanticDecoder(nn.Module):
 
         # network
         self.net = nn.Linear(hit_features, len(semantic_classes))
-            
-        self.classes = semantic_classes
-
+ 
         # Domain classifier network for DANN
         if self.da_loss_fnc_name == "dann":  
            self.domain_net = nn.Sequential(
@@ -165,11 +166,11 @@ class SemanticDecoder(nn.Module):
            if self.da_loss_fnc_name == "dann":    
               alpha = 1
                
-              reversed_S = ReverseLayerF.apply(source_data["hit"].x_semantic, alpha)
+              reversed_S = ReverseLayerF.apply(source_data["hit"].x, alpha)
               xSS = self.domain_net(reversed_S)
               ySS = torch.zeros(xSS.shape[0], dtype=torch.long, device=xSS.device)
             
-              reversed_T = ReverseLayerF.apply(target_data["hit"].x_semantic, alpha)
+              reversed_T = ReverseLayerF.apply(target_data["hit"].x, alpha)
               xTT = self.domain_net(reversed_T) 
               yTT = torch.ones(xTT.shape[0], dtype=torch.long, device=xTT.device)    
 
@@ -180,16 +181,16 @@ class SemanticDecoder(nn.Module):
               raw_lossDA = wDA * loss_func + self.da_temp
 
            elif self.da_loss_fnc_name == "mmd":
-                raw_lossDA = wDA * self.loss_mmd(source_data["hit"].x_semantic, target_data["hit"].x_semantic) + self.da_temp
+                raw_lossDA = wDA * self.loss_mmd(source_data["hit"].x, target_data["hit"].x) + self.da_temp
            elif self.da_loss_fnc_name == "semantic":
-                raw_lossDA = self.loss_semantic(source_data["hit"].x_semantic, y_source, target_data["hit"].x_semantic, y_target) 
+                raw_lossDA = self.loss_semantic(source_data["hit"].x, y_source, target_data["hit"].x, y_target) 
            elif self.da_loss_fnc_name == "sinkhorn":
-                pairwise_distances = torch.cdist(source_data["hit"].x_semantic, target_data["hit"].x_semantic, p=2)
+                pairwise_distances = torch.cdist(source_data["hit"].x, target_data["hit"].x, p=2)
                 flattened_distances = pairwise_distances.view(-1)
                 max_distance = torch.max(flattened_distances)
                 dynamic_blur_val = 0.05 * max_distance.detach().cpu().numpy()
-                raw_lossDA = wDA * self.loss_sinkhorn(source_data["hit"].x_semantic, 
-                                                      target_data["hit"].x_semantic, blur=max(dynamic_blur_val, 0.01)) + self.da_temp 
+                raw_lossDA = wDA * self.loss_sinkhorn(source_data["hit"].x, 
+                                                      target_data["hit"].x, blur=max(dynamic_blur_val, 0.01)) + self.da_temp 
            else:
               sys.exit( f"The function {self.da_loss_fnc_name} does not exist." )
    
@@ -229,7 +230,7 @@ class SemanticDecoder(nn.Module):
               metrics[f"semantic/loss_target{name}{stage}"] = loss_target
               if self.use_domain_adaptation:
                  metrics[f"semantic/loss_temp_scaled{name}{stage}"] = lossDA
-                 metrics[f"semantic/loss_function{name}{stage}"] = loss_func 
+                 metrics[f"semantic/loss_func{name}{stage}"] = loss_func 
 
         if stage == "train":
            name = "temp_source" if self.da_loss_fnc_name else "temperature" 
@@ -244,7 +245,7 @@ class SemanticDecoder(nn.Module):
            if self.da_loss_fnc_name in self.domain_adaptation_classes:
               self.target_cm_recall.update(x_target, y_target)
               self.target_cm_precision.update(x_target, y_target)
-              self.embeddings.update(source_data["hit"].x_semantic, y_source, target_data["hit"].x_semantic, y_target)
+              self.embeddings.update(source_data["hit"].x, y_source, target_data["hit"].x, y_target)
 
         # apply softmax to prediction
         source_data["hit"].x_semantic = source_data["hit"].x_semantic.softmax(dim=1)
@@ -291,27 +292,27 @@ class SemanticDecoder(nn.Module):
             return
 
         if self.da_loss_fnc_name == None:
-           self.cm_logger.log(f"semantic/recall_matrix/{stage}",
+           self.cm_logger.log(f"semantic/recall_matrix_{stage}",
                                 self.source_cm_recall, logger, epoch)
-           self.cm_logger.log(f"semantic/precision_matrix/{stage}",
+           self.cm_logger.log(f"semantic/precision_matrix_{stage}",
                                 self.source_cm_precision, logger, epoch)
         else:
-           logger.experiment.add_figure(f"semantic/recall_matrix_source/{stage}",
+           logger.experiment.add_figure(f"semantic/recall_matrix_source_{stage}",
                                      self.draw_confusion_matrix(self.source_cm_recall),
                                      global_step=epoch)
            self.source_cm_recall.reset()
 
-           logger.experiment.add_figure(f"semantic/recall_matrix_target/{stage}",
+           logger.experiment.add_figure(f"semantic/recall_matrix_target_{stage}",
                                      self.draw_confusion_matrix(self.target_cm_recall),
                                      global_step=epoch)
            self.target_cm_recall.reset()
 
-           logger.experiment.add_figure(f"semantic/precision_matrix_source/{stage}",
+           logger.experiment.add_figure(f"semantic/precision_matrix_source_{stage}",
                                 self.draw_confusion_matrix(self.source_cm_precision),
                                 global_step=epoch)
            self.source_cm_precision.reset()
 
-           logger.experiment.add_figure(f"semantic/precision_matrix_target/{stage}",
+           logger.experiment.add_figure(f"semantic/precision_matrix_target_{stage}",
                                 self.draw_confusion_matrix(self.target_cm_precision),
                                 global_step=epoch)
            self.target_cm_precision.reset()
@@ -322,6 +323,7 @@ class SemanticDecoder(nn.Module):
            dat2sub, lab2sub = self.embeddings.subsample(dat2, lab2, max_samples=1000)
         
            embeddings_fig = self.embeddings.plot_combined(dat1sub, lab1sub, dat2sub, lab2sub, epoch=epoch, class_names=self.semantic_classes)
-           logger.experiment.add_figure(f"Embeddings Semantic Decoder/{stage}",
+           logger.experiment.add_figure(f"semantic/embeddings_{stage}",
                                      embeddings_fig, global_step=epoch)
+
            self.embeddings.reset()

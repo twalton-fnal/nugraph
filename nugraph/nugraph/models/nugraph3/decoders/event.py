@@ -45,6 +45,7 @@ class EventDecoder(nn.Module):
         super().__init__()
 
         self.warmup_epochs = warmup_epochs
+        self.use_da_after_warmups = True
         self.da_loss_fnc_name = da_loss_fnc_name
         self.use_domain_adaptation = False 
         self.domain_adaptation_classes = [ "dann", "mmd", "semantic", "sinkhorn" ]
