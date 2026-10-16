@@ -120,9 +120,10 @@ class EventDecoder(nn.Module):
         else:
            source_data, target_data = data 
 
-        # run network and calculate loss
+        # initialize the loss variables
         loss = loss_source = loss_target = lossDA = loss_func = raw_lossDA = 0
-        
+
+        # calculate the loss functions
         x_source = self.net(source_data["evt"].x)
         y_source = source_data["evt"].y
         w_source = 2 * (-1 * self.source_temp).exp()
@@ -139,7 +140,7 @@ class EventDecoder(nn.Module):
 
         """
            Domain Adaptation is implemented via the Domain-Adversarial Neural Network (DANN). 
-           Both source and target labels are being used to calculate event losses (loss_source and loss_target).
+           Both source and target labels are used to calculate event losses (loss_source and loss_target).
            All losses are scaled by their own temperatures, which are trainable parameters.
            DA loss is also capped at most 1/4 of the loss_source (to be on the safe side). 
         """ 
@@ -168,13 +169,15 @@ class EventDecoder(nn.Module):
               flattened_distances = pairwise_distances.view(-1)
               max_distance = torch.max(flattened_distances)
               dynamic_blur_val = 0.05 * max_distance.detach().cpu().numpy()
-               
-              raw_lossDA = wDA * self.loss_sinkhorn(source_data["evt"].x, 
-                                                    target_data["evt"].x, blur=max(dynamic_blur_val, 0.01)) + self.da_temp
-           elif self.da_loss_fnc_name == "mmd":  
-              raw_lossDA = wDA * self.loss_mmd(source_data["evt"].x, target_data["evt"].x) + self.da_temp 
+
+              loss_func = self.loss_sinkhorn(source_data["evt"].x, target_data["evt"].x, blur=max(dynamic_blur_val, 0.01))
+              raw_lossDA = wDA * loss_func + self.da_temp
+           elif self.da_loss_fnc_name == "mmd":
+              loss_func = self.loss_mmd(source_data["evt"].x, target_data["evt"].x) 
+              raw_lossDA = wDA * loss_func + self.da_temp 
            elif self.da_loss_fnc_name == "semantic":
-              raw_lossDA = self.loss_semantic(source_data["evt"].x, y_source, target_data["evt"].x, y_target) 
+              loss_func =  self.loss_semantic(source_data["evt"].x, y_source, target_data["evt"].x, y_target)
+              raw_lossDA = wDA * loss_func + self.da_temp 
            else:
               sys.exit( f"The function {self.da_loss_fnc_name} does not exist." )
                

@@ -13,6 +13,7 @@ class Transform(BaseTransform):
     def __init__(self, planes: tuple[str]):
         super().__init__()
         self.planes = planes
+        
 
     def forward(self, data: NuGraphData) -> NuGraphData:
 
@@ -22,22 +23,25 @@ class Transform(BaseTransform):
         Args:
            data: NuGraph data object to transform
         """
-
+        
         # transform old planar format into new hierarchical format
         if "hit" not in data.node_types:
-
+            
             # unify planar edges
             edge_plane = []
             edge_nexus = []
+
             for i, p in enumerate(self.planes):
                 offset = 0
+                
                 for j in range(i): # get offset from previous planes
-                    offset += data[self.planes[j]].num_nodes
+                    offset += data[self.planes[j]].num_nodes 
                 edge_plane.append(data[p, "plane", p].edge_index + offset)
                 del data[p, "plane", p]
                 edge_nexus.append(data[p, "nexus", "sp"].edge_index)
                 edge_nexus[-1][0] += offset # increment only the plane node index
                 del data[p, "nexus", "sp"]
+                
             data["hit", "delaunay-planar", "hit"].edge_index = torch.cat(edge_plane, dim=1)
             data["hit", "nexus", "sp"].edge_index = torch.cat(edge_nexus, dim=1)
 
@@ -52,7 +56,7 @@ class Transform(BaseTransform):
             for p in self.planes:
                 del data[p]
 
-            # add true instance nodes
+            # add true instance nodes for the instance decoder 
             if hasattr(data["hit"], "y_instance"):
                 y = data["hit"].y_instance
                 mask = y != -1
@@ -68,7 +72,7 @@ class Transform(BaseTransform):
                 edges = torch.stack((mask.nonzero().squeeze(1), y), dim=0).long()
                 data["hit", "cluster-truth", "particle-truth"].edge_index = edges
                 del data["hit"].y_instance
-
+            
             # add edges to and from event node
             data["evt"].x = torch.empty((1, 0))
             lo = torch.arange(data["hit"].num_nodes, dtype=torch.long)
@@ -77,19 +81,19 @@ class Transform(BaseTransform):
             lo = torch.arange(data["sp"].num_nodes, dtype=torch.long)
             hi = torch.zeros(data["sp"].num_nodes, dtype=torch.long)
             data["sp", "in", "evt"].edge_index = torch.stack((lo, hi), dim=0)
-
+       
         # rename true hit position (remove once spacepoint decoder is mature)
         if "c" in data["hit"].keys():
             data["hit"].y_position = data["hit"].c
             del data["hit"].c
-
+   
         # ensure event truth labels have correct format
         evt = data["evt"]
         if not evt.y.ndim:
            evt.y = evt.y.reshape([1])
-            
+     
         # concatenate position tensor onto node features
         h = data["hit"]
         h.x = torch.cat((h.pos, h.x), dim=-1)
-
+      
         return data

@@ -100,17 +100,12 @@ class NuGraphDataModule(LightningDataModule):
                      print(("Data size array not found in file! "
                             "Call \"generate_samples\" to create it."))
                      sys.exit()
-
-            transform = model.transform(self.planes) if model else None
-
-            if file_index == 0 :
-               self.source_transform = transform
-            else:
-               self.target_transform = transform
             
-            train_dataset = NuGraphDataset(filename, train_samples, self.source_transform )
-            val_dataset   = NuGraphDataset(filename, val_samples, self.source_transform)
-            test_dataset  = NuGraphDataset(filename, test_samples, self.source_transform)
+            transform = model.transform(self.planes) if model else None
+            
+            train_dataset = NuGraphDataset(filename, train_samples, transform )
+            val_dataset   = NuGraphDataset(filename, val_samples, transform)
+            test_dataset  = NuGraphDataset(filename, test_samples, transform)
 
             if file_index == 0:
                self.train_dataset = train_dataset
@@ -122,9 +117,9 @@ class NuGraphDataModule(LightningDataModule):
                self.test_dataset_target  = test_dataset
 
         """
-        Carry out the procedure for combining the input source and target datasets.
+        Combine the input source and target datasets.
         Note: The NuGraphCombinedCycle functionality has not been fully tested.
-               It cycles through the smaller dataset until the larger dataset is loaded.
+               It cycles through the smaller dataset until it loads the larger dataset.
         """
         if self.target_filename:
            self.combined_train = NuGraphCombinedDataset(self.train_dataset, self.train_dataset_target)

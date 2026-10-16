@@ -42,7 +42,7 @@ class SemanticDecoder(nn.Module):
                  da_loss_fnc_name: str = None,
                  warmup_epochs: int = 0):
         super().__init__()
-
+     
         self.semantic_classes = semantic_classes
         self.warmup_epochs = warmup_epochs
         self.use_da_after_warmups = False
@@ -94,7 +94,7 @@ class SemanticDecoder(nn.Module):
            self.target_cm_precision = tm.ConfusionMatrix(normalize="pred", **metric_args)
            self.embeddings = CombinedEmbeddingPlot(method="umap")
 
-        # network
+        # neutral network module
         self.net = nn.Linear(hit_features, len(semantic_classes))
  
         # Domain classifier network for DANN
@@ -136,9 +136,10 @@ class SemanticDecoder(nn.Module):
         if self.da_loss_fnc_name in self.domain_adaptation_classes:
            _run_net_and_add_output(target_data, self.net, "hit")
 
-        # calculate loss
+        # initialize the loss variables
         loss = loss_source = loss_target = lossDA = loss_func = raw_lossDA = 0
-    
+
+        # calculate loss
         x_source = source_data["hit"].x_semantic
         y_source = source_data["hit"].y_semantic
         w_source = 2 * (-1 * self.source_temp).exp()
@@ -155,7 +156,7 @@ class SemanticDecoder(nn.Module):
 
         """
             Domain Adaptation is optional and is implemented via DANN (lossDA). 
-            Both source and target labels are being used to calculate 
+            Both source and target labels are used to calculate 
             semantic losses (loss_source and loss_target).
             All losses are scaled by their own temperatures, which are trainable parameters.
             DA loss is also capped at most 1/4 of the loss_source (to be on the safe side). 
@@ -216,14 +217,14 @@ class SemanticDecoder(nn.Module):
             
         # calculate metrics
         metrics = {}
-
+        
         if stage:
-           name = "_source_da_%s/" % self.da_loss_fnc_name if self.da_loss_fnc_name else "/" 
-           metrics[f"semantic/loss_total/{stage}"] = loss
+           name = "_source_da_%s_" % self.da_loss_fnc_name if self.da_loss_fnc_name else "_" 
+           metrics[f"semantic/loss_total_{stage}"] = loss
            metrics[f"semantic/recall{name}{stage}"] = self.source_recall(x_source, y_source)
            metrics[f"semantic/precision{name}{stage}"] = self.source_precision(x_source, y_source)
            if self.da_loss_fnc_name: 
-              name = "_da_%s/" % self.da_loss_fnc_name  
+              name = "_da_%s_" % self.da_loss_fnc_name  
               metrics[f"semantic/recall_target{name}{stage}"] = self.target_recall(x_target, y_target)
               metrics[f"semantic/precision_target{name}{stage}"] = self.target_precision(x_target, y_target)
               metrics[f"semantic/loss_source{name}{stage}"] = loss_source

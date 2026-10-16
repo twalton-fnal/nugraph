@@ -115,7 +115,7 @@ class NuGraph3(LightningModule):
 
         if filter_head:
             self.filter_decoder = FilterDecoder(hit_features,
-                                                da_loss_fnc_name=self.da_loss_fnc_name, 
+                                                da_loss_fnc_name=self.da_loss_fnc_name,
                                                 warmup_epochs=self.warmup_epochs)
             self.filter_decoder.use_da_after_warmups = False
             self.decoders.append(self.filter_decoder)
@@ -160,7 +160,7 @@ class NuGraph3(LightningModule):
               batchA, batchB = data
            else:
               raise ValueError("Expected input data to be a list of two batches.")
-
+        
         # run the encoder and message-passing blocks
         if self.da_loss_fnc_name in self.domain_adaptation_classes:
            self.encoder(data=[batchA,batchB])
