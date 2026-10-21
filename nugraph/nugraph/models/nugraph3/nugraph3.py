@@ -3,6 +3,9 @@ import argparse
 import warnings
 import psutil
 
+from typing import List, Union, Tuple
+from collections.abc import Iterable
+
 import torch.cuda
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
@@ -59,7 +62,7 @@ class NuGraph3(LightningModule):
                  semantic_classes: tuple[str] = ('MIP','HIP','shower','michel','diffuse'),
                  event_classes: tuple[str] = ('numu','nue','nc'),
                  num_iters: int = 5,
-                 event_head: bool = False,
+                 event_head: bool = True,
                  semantic_head: bool = True,
                  filter_head: bool = True,
                  vertex_head: bool = False,
@@ -139,8 +142,15 @@ class NuGraph3(LightningModule):
         self.max_mem_cpu = 0.
         self.max_mem_gpu = 0.    
 
-            
-    def forward(self, data: Data | list[Data], stage: str = None): # pylint: disable=arguments-differ
+
+    def _run_core(self, batches: Iterable[Data]) -> None:
+        """Run the core network `self.num_iters` times on each batch."""
+        for _ in range(self.num_iters):
+            for batch in batches:
+                self.core_net(batch)
+
+     
+    def forward(self, data: Union[Data, List[Data]], stage: str | None = None) -> Tuple[float,dict]: # pylint: disable=arguments-differ
         """
         NuGraph3 forward function
 
@@ -149,54 +159,60 @@ class NuGraph3(LightningModule):
         and log any performance metrics.
 
         Args:
-            data: Graph data object
+            data: Graph data object or a list of graph data objects
             stage: String tag defining the step type
         """
-        
-        # Check if the input is a list of two batches
-        batchA = data
-        if self.da_loss_fnc_name in self.domain_adaptation_classes:
-           if isinstance(data, list) and len(data) == 2:
-              batchA, batchB = data
-           else:
-              raise ValueError("Expected input data to be a list of two batches.")
-        
-        # run the encoder and message-passing blocks
-        if self.da_loss_fnc_name in self.domain_adaptation_classes:
-           self.encoder(data=[batchA,batchB])
-           for _ in range(self.num_iters):
-               self.core_net(batchA)
-               self.core_net(batchB)
-        else:
-           self.encoder(batchA)
-           for _ in range(self.num_iters):
-               self.core_net(batchA)
 
-        # determine if the DA loss function is enabled for a decoder
+        # ------------------------------------------------------------------
+        # Resolve batches & domain‑adaptation flag
+        # ------------------------------------------------------------------
+        is_da = self.da_loss_fnc_name in self.domain_adaptation_classes
+
+        if is_da:
+            if not (isinstance(data, list) and len(data) == 2):
+                raise ValueError("The DA mode expects input data`to be a list of two batches.")
+            batchA, batchB = data 
+            batches = (batchA, batchB)
+        else:
+            batchA = data  
+            batches = (batchA,)
+
+        # ------------------------------------------------------------------
+        # Run the encoder and message‑passing blocks
+        # ------------------------------------------------------------------
+        self.encoder(data=list(batches))
+        self._run_core(batches)
+
+        # ------------------------------------------------------------------
+        # Determine which decoders can be used in DA mode
+        # -- if decoder has the attribute `use_domain_adaptation`, then
+        # -- the DA code has been implemented.
+        # ------------------------------------------------------------------
         enable_da_decoders = []
         for name, decoder in {"event_decoder": getattr(self, "event_decoder", None),
                               "semantic_decoder": getattr(self, "semantic_decoder", None),
                               "filter_decoder": getattr(self, "filter_decoder", None)
                              }.items():
             if decoder and hasattr(decoder, "use_domain_adaptation"):
-               enable_da_decoders.append( decoder )
+               enable_da_decoders.append( decoder ) 
 
-        # run the decoders and calculate the loss and metrics
-        total_loss = 0.
-        total_metrics = {}
-        
+        # ------------------------------------------------------------------
+        # Run decoders, collect loss & metrics
+        # ------------------------------------------------------------------
+        total_loss = 0.0
+        total_metrics: dict = {}
+
         for decoder in self.decoders:
-            if len(data) == 2: 
-               if decoder in enable_da_decoders:
-                  loss, metrics = decoder(data=[batchA, batchB], stage=stage)
-               else:
-                   raise ValueError("The decoder [", decoder, "] is not enabled.")
-            else:
-               loss, metrics = decoder(data=batchA, stage=stage)
+            if is_da and decoder not in enable_da_decoders:
+                raise ValueError(f"The decoder `{decoder}` is not DA‑enabled.")
+            loss, metrics = decoder(
+                data=list(batches) if is_da else batchA,
+                stage=stage,
+            )
             total_loss += loss
             total_metrics.update(metrics)
-                   
-        return total_loss, total_metrics
+
+        return total_loss, total_metrics 
 
     
     def on_train_epoch_start(self) -> None:
@@ -224,7 +240,8 @@ class NuGraph3(LightningModule):
             
     def on_train_epoch_end(self) -> None:
         # stop updating running average for feature norm
-        self.encoder.input_norms.update = False
+        for norm in self.encoder.input_norms.values():
+            norm.update = False
         print("Finished training epoch")        
 
         

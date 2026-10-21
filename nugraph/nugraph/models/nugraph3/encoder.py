@@ -70,7 +70,7 @@ class Encoder(torch.nn.Module):
 
         
     
-    def forward(self, data: Data | list[Data]) -> None:
+    def forward(self, data: Data | list[Data], domain: str = "source") -> None:
         """
         NuGraph3 encoder forward pass
         
@@ -83,5 +83,7 @@ class Encoder(torch.nn.Module):
                mode = "source" if i == 0 else "target"
                self.apply_normalizations(d, mode=mode)
         else:
-           self.apply_normalizations(data, mode="source")
+           if domain not in self.input_norms:
+              raise ValueError(f"The domain `{domain}` is not set.")
+           self.apply_normalizations(data, mode=domain)
                

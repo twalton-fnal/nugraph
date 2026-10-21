@@ -40,7 +40,7 @@ class FilterDecoder(nn.Module):
         self.use_da_after_warmups = False
         self.da_loss_fnc_name = da_loss_fnc_name
         self.use_domain_adaptation = False 
-        self.domain_adaptation_classes = [ "dann", "mmd", "semantic", "sinkhorn" ]
+        self.domain_adaptation_classes = [ "off", "dann", "mmd", "semantic", "sinkhorn" ]
    
         # loss function
         self.loss = nn.BCEWithLogitsLoss()
@@ -94,11 +94,12 @@ class FilterDecoder(nn.Module):
         """
 
         # the data
-        if not self.da_loss_fnc_name in self.domain_adaptation_classes:
-           source_data = data
+        paired = isinstance(data, (list, tuple))
+        if not paired:
+            source_data = data
         else:
-           source_data, target_data = data 
-    
+            source_data, target_data = data 
+     
         # run network and add output to graph object      
         def _run_net_and_add_output(data: Any, net: torch.nn.Module, key: str):
             data[key].x_filter = net(data[key].x)
@@ -108,38 +109,25 @@ class FilterDecoder(nn.Module):
                data._inc_dict[key]["x_filter"] = inc
         
         _run_net_and_add_output(source_data, self.net, "hit")
-        if self.da_loss_fnc_name in self.domain_adaptation_classes:
+        if paired:
            _run_net_and_add_output(target_data, self.net, "hit")
 
         # initialize loss variables
         loss = loss_source = loss_target = lossDA = loss_func = raw_lossDA = 0
 
         # calculate the loss
-        """
         if "from_nu" in source_data.keys():
            y_source = (source_data["hit"].from_nu == 1).float()
-        """
-       
-        if hasattr(source_data["hit"], "y_filter"):
-           y_source = source_data["hit"].y_filter.float()
-           print(y_source)
-           import sys
-           sys.exit()
         else:
            y_source = (source_data["hit"].y_semantic != -1).float()
 
         x_source = source_data["hit"].x_filter.squeeze(dim=-1)
         w_source = 2 * (-1 * self.source_temp).exp()
         loss_source = w_source * self.loss(x_source, y_source) + self.source_temp
-
         
-        if self.da_loss_fnc_name in self.domain_adaptation_classes:
-           """ 
+        if paired:
            if "from_nu" in target_data.keys():
               y_target = (target_data["hit"].from_nu == 1).float()
-           """
-           if hasattr(target_data["hit"], "y_filter"):
-              y_target = target_data["hit"].y_filter.float()
            else:
               y_target = (target_data["hit"].y_semantic != -1).float() 
                
@@ -147,10 +135,7 @@ class FilterDecoder(nn.Module):
            w_target = 2 * (-1 * self.target_temp).exp()
            loss_target = w_target * self.loss(x_target, y_target) + self.target_temp
             
-        if self.da_loss_fnc_name == None:
-           loss = loss_source
-
-        if self.use_domain_adaptation:
+        if paired and self.use_domain_adaptation:
            wDA = 2 * (-1 * self.da_temp).exp()
             
            if self.da_loss_fnc_name == "dann":    
@@ -182,44 +167,48 @@ class FilterDecoder(nn.Module):
         metrics = {}
 
         if stage:
-           name = "_source_da_%s_" % self.da_loss_fnc_name if self.da_loss_fnc_name else "_" 
+           name = "_source_da_%s_" % self.da_loss_fnc_name if paired else "_" 
            metrics[f"filter/loss_total_{stage}"] = loss
            metrics[f"filter/recall{name}{stage}"] = self.source_recall(x_source, y_source)
            metrics[f"filter/precision{name}{stage}"] = self.source_precision(x_source, y_source)
-           if self.da_loss_fnc_name: 
+           if paired: 
               name = "_da_%s_" % self.da_loss_fnc_name  
               metrics[f"filter/recall_target{name}{stage}"] = self.target_recall(x_target, y_target)
               metrics[f"filter/precision_target{name}{stage}"] = self.target_precision(x_target, y_target)
               metrics[f"filter/loss_source{name}{stage}"] = loss_source
               metrics[f"filter/loss_target{name}{stage}"] = loss_target
-              if self.use_domain_adaptation:
-                 metrics[f"filter/loss_temp_scaled{name}{stage}"] = lossDA
-                 metrics[f"filter/loss_func{name}{stage}"] = loss_func 
+              metrics[f"filter/loss_temp_scaled{name}{stage}"] = lossDA
+              metrics[f"filter/loss_func{name}{stage}"] = loss_func 
 
         if stage == "train":
-           name = "temp_source" if self.da_loss_fnc_name else "temperature" 
+           name = "temp_source" if paired else "temperature" 
            metrics[f"filter/{name}"] = self.source_temp
-           if self.da_loss_fnc_name:             
+           if paired:             
               metrics["filter/temp_target"] = self.target_temp
               metrics[f"filter/temp_da_{self.da_loss_fnc_name}"] = self.da_temp
                 
         if stage in ["val", "test"]:
            self.source_cm_recall.update(x_source, y_source)
            self.source_cm_precision.update(x_source, y_source)
-           if self.da_loss_fnc_name in self.domain_adaptation_classes:
+           if paired:
               self.target_cm_recall.update(x_target, y_target)
               self.target_cm_precision.update(x_target, y_target)
 
-        # run network and add output to graph object
-        source_data["hit"].x_filter = source_data["hit"].x_filter.sigmoid()
-        if self.da_loss_fnc_name in self.domain_adaptation_classes:
-            target_data["hit"].x_filter = target_data["hit"].x_filter.sigmoid()
-            
-        if isinstance(data, Batch):
-            # pylint: disable=protected-access
-            data._slice_dict["hit"]["x_filter"] = data["hit"].ptr
-            inc = torch.zeros(data.num_graphs, device=data["hit"].x.device)
-            data._inc_dict["hit"]["x_filter"] = inc
+        # add inference output to graph object
+        source_data["hit"].x_filter = source_data["hit"].x_filter.sigmoid() 
+        if isinstance(source_data, Batch):
+           # pylint: disable=protected-access
+           source_data._slice_dict["hit"]["x_filter"] = source_data["hit"].ptr
+           inc = torch.zeros(source_data.num_graphs, device=source_data["hit"].x.device)
+           source_data._inc_dict["hit"]["x_filter"] = inc
+        
+        if paired:
+           target_data["hit"].x_filter = target_data["hit"].x_filter.sigmoid()
+           if isinstance(target_data, Batch):
+              # pylint: disable=protected-access
+              target_data._slice_dict["hit"]["x_filter"] = target_data["hit"].ptr
+              incT = torch.zeros(target_data.num_graphs, device=target_data["hit"].x.device)
+              target_data._inc_dict["hit"]["x_filter"] = incT
 
         return loss, metrics
 
@@ -241,6 +230,9 @@ class FilterDecoder(nn.Module):
         plt.ylim(0, len(self.classes))
         plt.xlabel("Assigned label")
         plt.ylabel("True label")
+        if self.da_loss_fnc_name in self.domain_adaptation_classes:
+           plt.title(f"Domain Adaptation ({self.da_loss_fnc_name.upper()})")
+
         return fig
         
     

@@ -48,7 +48,7 @@ class EventDecoder(nn.Module):
         self.use_da_after_warmups = True
         self.da_loss_fnc_name = da_loss_fnc_name
         self.use_domain_adaptation = False 
-        self.domain_adaptation_classes = [ "dann", "mmd", "semantic", "sinkhorn" ]
+        self.domain_adaptation_classes = [ "off", "dann", "mmd", "semantic", "sinkhorn" ]
         
         # loss function
         self.loss = RecallLoss()
@@ -115,10 +115,11 @@ class EventDecoder(nn.Module):
         """
         
         # the data
-        if not self.da_loss_fnc_name in self.domain_adaptation_classes:
-           source_data = data
-        else:
-           source_data, target_data = data 
+        paired = isinstance(data, (list, tuple))
+        if not paired:
+            source_data = data
+         else:
+            source_data, target_data = data 
 
         # initialize the loss variables
         loss = loss_source = loss_target = lossDA = loss_func = raw_lossDA = 0
@@ -128,11 +129,8 @@ class EventDecoder(nn.Module):
         y_source = source_data["evt"].y
         w_source = 2 * (-1 * self.source_temp).exp()
         loss_source = w_source * self.loss(x_source, y_source) + self.source_temp
-        
-        if self.da_loss_fnc_name == None:
-           loss = loss_source
-    
-        if self.da_loss_fnc_name in self.domain_adaptation_classes:
+
+        if paired:
            x_target = self.net(target_data["evt"].x)
            y_target = target_data["evt"].y
            w_target = 2 * (-1 * self.target_temp).exp() 
@@ -144,7 +142,7 @@ class EventDecoder(nn.Module):
            All losses are scaled by their own temperatures, which are trainable parameters.
            DA loss is also capped at most 1/4 of the loss_source (to be on the safe side). 
         """ 
-        if self.use_domain_adaptation:  
+        if paired and self.use_domain_adaptation:  
            wDA = 2 * (-1 * self.da_temp).exp()
             
            if self.da_loss_fnc_name == "dann":  
@@ -186,11 +184,11 @@ class EventDecoder(nn.Module):
              (currently to be at most 1/4 of the event loss value)
              The "sharp" variable is the sharpness of the transition when the 
              source event loss goes from positive to negative
-           """
-           """ 
+        
              Use the temperature scaling to calculate the DA loss 
              Therefore, turn off the capping method for the DA loss
-             
+           """  
+           """  
            sharp = 20.0  
            sig = torch.sigmoid(sharp * loss_source)
            max_lossDA = sig * (loss_source / 4) + (1 - sig) * (4 * loss_source)
@@ -205,31 +203,30 @@ class EventDecoder(nn.Module):
         metrics = {}
         
         if stage:
-           name = "_source_da_%s_" % self.da_loss_fnc_name if self.da_loss_fnc_name else "_" 
+           name = "_source_da_%s_" % self.da_loss_fnc_name if paired else "_" 
            metrics[f"event/loss_total_{stage}"] = loss
            metrics[f"event/recall{name}{stage}"] = self.source_recall(x_source, y_source)
            metrics[f"event/precision{name}{stage}"] = self.source_precision(x_source, y_source)
-           if self.da_loss_fnc_name: 
+           if paired: 
               name = "_da_%s_" % self.da_loss_fnc_name  
               metrics[f"event/recall_target{name}{stage}"] = self.target_recall(x_target, y_target)
               metrics[f"event/precision_target{name}{stage}"] = self.target_precision(x_target, y_target)
               metrics[f"event/loss_source{name}{stage}"] = loss_source
-              metrics[f"event/loss_target{name}{stage}"] = loss_target
-              if self.use_domain_adaptation:
-                 metrics[f"event/loss_temp_scaled{name}{stage}"] = lossDA
-                 metrics[f"event/loss_func{name}{stage}"] = loss_func 
+              metrics[f"event/loss_target{name}{stage}"] = loss_target               
+              metrics[f"event/loss_temp_scaled{name}{stage}"] = lossDA
+              metrics[f"event/loss_func{name}{stage}"] = loss_func 
 
         if stage == "train":
-           name = "temp_source" if self.da_loss_fnc_name else "temperature" 
+           name = "temp_source" if paired else "temperature" 
            metrics[f"event/{name}"] = self.source_temp
-           if self.da_loss_fnc_name:             
+           if paired:             
               metrics["event/temp_target"] = self.target_temp
               metrics[f"event/temp_da_{self.da_loss_fnc_name}"] = self.da_temp
             
         if stage in ["val", "test"]:
             self.source_cm_recall.update(x_source, y_source)
-            self.source_cm_precision.update(x_source, y_source)            
-            if self.da_loss_fnc_name in self.domain_adaptation_classes:
+            self.source_cm_precision.update(x_source, y_source)  
+            if paired:
                self.target_cm_recall.update(x_target, y_target)
                self.target_cm_precision.update(x_target, y_target)
                self.embeddings.update(source_data["evt"].x, y_source, target_data["evt"].x, y_target)
@@ -242,11 +239,11 @@ class EventDecoder(nn.Module):
             inc = torch.zeros(source_data.num_graphs, device=source_data["evt"].x.device)
             source_data._inc_dict["evt"]["e"] = inc
 
-        if self.da_loss_fnc_name in self.domain_adaptation_classes:
+        if paired:
            target_data["evt"].e = x_target.softmax(dim=1)
            if isinstance(target_data, Batch):
             target_data._slice_dict["evt"]["e"] = target_data["evt"].ptr
-            incT = torch.zeros(source_data.num_graphs, device=target_data["evt"].x.device)
+            incT = torch.zeros(target_data.num_graphs, device=target_data["evt"].x.device)
             target_data._inc_dict["evt"]["e"] = incT
         
         return loss, metrics

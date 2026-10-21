@@ -48,7 +48,7 @@ class SemanticDecoder(nn.Module):
         self.use_da_after_warmups = False
         self.da_loss_fnc_name = da_loss_fnc_name
         self.use_domain_adaptation = False 
-        self.domain_adaptation_classes = [ "dann", "mmd", "semantic", "sinkhorn" ]
+        self.domain_adaptation_classes = [ "off", "dann", "mmd", "semantic", "sinkhorn" ]
         
         # loss function
         self.loss = RecallLoss()
@@ -119,10 +119,12 @@ class SemanticDecoder(nn.Module):
         """
 
         # the data
-        if not self.da_loss_fnc_name in self.domain_adaptation_classes:
-           source_data = data
+        paired = isinstance(data, (list, tuple))
+        if not paired:
+            source_data = data
         else:
-           source_data, target_data = data 
+            source_data, target_data = data 
+
             
         # run network and add output to graph object      
         def _run_net_and_add_output(data: Any, net: torch.nn.Module, key: str):
@@ -133,7 +135,7 @@ class SemanticDecoder(nn.Module):
                data._inc_dict[key]["x_semantic"] = inc
 
         _run_net_and_add_output(source_data, self.net, "hit")
-        if self.da_loss_fnc_name in self.domain_adaptation_classes:
+        if paired:
            _run_net_and_add_output(target_data, self.net, "hit")
 
         # initialize the loss variables
@@ -145,14 +147,11 @@ class SemanticDecoder(nn.Module):
         w_source = 2 * (-1 * self.source_temp).exp()
         loss_source = w_source * self.loss(x_source, y_source) + self.source_temp
             
-        if self.da_loss_fnc_name in self.domain_adaptation_classes:
+        if paired:
            x_target = target_data["hit"].x_semantic
            y_target = target_data["hit"].y_semantic
            w_target = 2 * (-1 * self.target_temp).exp()
            loss_target = w_target * self.loss(x_target, y_target) + self.target_temp
-            
-        if self.da_loss_fnc_name == None:
-           loss = loss_source
 
         """
             Domain Adaptation is optional and is implemented via DANN (lossDA). 
@@ -161,7 +160,7 @@ class SemanticDecoder(nn.Module):
             All losses are scaled by their own temperatures, which are trainable parameters.
             DA loss is also capped at most 1/4 of the loss_source (to be on the safe side). 
         """
-        if self.use_domain_adaptation:
+        if paired and self.use_domain_adaptation:
            wDA = 2 * (-1 * self.da_temp).exp()
             
            if self.da_loss_fnc_name == "dann":    
@@ -219,38 +218,37 @@ class SemanticDecoder(nn.Module):
         metrics = {}
         
         if stage:
-           name = "_source_da_%s_" % self.da_loss_fnc_name if self.da_loss_fnc_name else "_" 
+           name = "_source_da_%s_" % self.da_loss_fnc_name if paired else "_" 
            metrics[f"semantic/loss_total_{stage}"] = loss
            metrics[f"semantic/recall{name}{stage}"] = self.source_recall(x_source, y_source)
            metrics[f"semantic/precision{name}{stage}"] = self.source_precision(x_source, y_source)
-           if self.da_loss_fnc_name: 
+           if paired: 
               name = "_da_%s_" % self.da_loss_fnc_name  
               metrics[f"semantic/recall_target{name}{stage}"] = self.target_recall(x_target, y_target)
               metrics[f"semantic/precision_target{name}{stage}"] = self.target_precision(x_target, y_target)
               metrics[f"semantic/loss_source{name}{stage}"] = loss_source
               metrics[f"semantic/loss_target{name}{stage}"] = loss_target
-              if self.use_domain_adaptation:
-                 metrics[f"semantic/loss_temp_scaled{name}{stage}"] = lossDA
-                 metrics[f"semantic/loss_func{name}{stage}"] = loss_func 
+              metrics[f"semantic/loss_temp_scaled{name}{stage}"] = lossDA
+              metrics[f"semantic/loss_func{name}{stage}"] = loss_func 
 
         if stage == "train":
            name = "temp_source" if self.da_loss_fnc_name else "temperature" 
-           metrics[f"semantic/{name}"] = self.source_temp
-           if self.da_loss_fnc_name:             
+           metrics[f"semantic/{name}"] = self.source_temp  
+           if paired:
               metrics["semantic/temp_target"] = self.target_temp
               metrics[f"semantic/temp_da_{self.da_loss_fnc_name}"] = self.da_temp
                 
         if stage in ["val", "test"]:
            self.source_cm_recall.update(x_source, y_source)
            self.source_cm_precision.update(x_source, y_source)
-           if self.da_loss_fnc_name in self.domain_adaptation_classes:
+           if paired:
               self.target_cm_recall.update(x_target, y_target)
               self.target_cm_precision.update(x_target, y_target)
               self.embeddings.update(source_data["hit"].x, y_source, target_data["hit"].x, y_target)
 
         # apply softmax to prediction
         source_data["hit"].x_semantic = source_data["hit"].x_semantic.softmax(dim=1)
-        if self.da_loss_fnc_name in self.domain_adaptation_classes:
+        if paired:
            target_data["hit"].x_semantic = target_data["hit"].x_semantic.softmax(dim=1)
 
         return loss, metrics
