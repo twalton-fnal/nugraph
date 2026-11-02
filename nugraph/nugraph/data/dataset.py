@@ -17,8 +17,34 @@ class NuGraphDataset(Dataset):
                  samples: list[str],
                  transform: Optional[Callable] = None):
         super().__init__(transform=transform)
-        self.file = h5py.File(filename)
+
+        self.filename = filename
         self.samples = samples
+
+        # the HDF5 file is opened on first use in each process (see `file`)
+        self._file = None
+        self._file_pid = None
+
+    @property
+    def file(self) -> h5py.File:
+        """
+        Read-only HDF5 handle, opened lazily and once per process.
+
+        A handle opened in the parent and inherited by forked DataLoader
+        workers is shared across processes, which h5py does not support;
+        reopening in each worker makes num_workers > 0 safe.
+        """
+        if self._file is None or self._file_pid != os.getpid():
+           self._file = h5py.File(self.filename, "r")
+           self._file_pid = os.getpid()
+        return self._file
+
+    def __getstate__(self):
+        # workers started with "spawn" receive a pickled copy: send no handle
+        state = self.__dict__.copy()
+        state["_file"] = None
+        state["_file_pid"] = None
+        return state    
 
     def len(self) -> int:
         return len(self.samples)

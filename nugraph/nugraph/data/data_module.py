@@ -93,9 +93,13 @@ class NuGraphDataModule(LightningDataModule):
                             "Call \"generate_samples\" to create them."))
                      sys.exit()
 
-                 # load data sizes
+                 # load data sizes (per domain)
                  try:
-                     self.train_datasize = f['datasize/train'][()]
+                     datasize = f['datasize/train'][()]
+                     if file_index == 0:
+                        self.train_datasize_source = datasize
+                     else:
+                        self.train_datasize_target = datasize
                  except KeyError:
                      print(("Data size array not found in file! "
                             "Call \"generate_samples\" to create it."))
@@ -108,9 +112,9 @@ class NuGraphDataModule(LightningDataModule):
             test_dataset  = NuGraphDataset(filename, test_samples, transform)
 
             if file_index == 0:
-               self.train_dataset = train_dataset
-               self.val_dataset   = val_dataset
-               self.test_dataset  = test_dataset
+               self.train_dataset_source = train_dataset
+               self.val_dataset_source   = val_dataset
+               self.test_dataset_source  = test_dataset
             elif file_index == 1:
                self.train_dataset_target = train_dataset
                self.val_dataset_target   = val_dataset
@@ -122,9 +126,9 @@ class NuGraphDataModule(LightningDataModule):
                It cycles through the smaller dataset until it loads the larger dataset.
         """
         if self.target_filename:
-           self.combined_train = NuGraphCombinedDataset(self.train_dataset, self.train_dataset_target)
-           self.combined_val   = NuGraphCombinedDataset(self.val_dataset, self.val_dataset_target)
-           self.combined_test  = NuGraphCombinedDataset(self.test_dataset, self.test_dataset_target)
+           self.combined_train = NuGraphCombinedDataset(self.train_dataset_source, self.train_dataset_target)
+           self.combined_val   = NuGraphCombinedDataset(self.val_dataset_source, self.val_dataset_target)
+           self.combined_test  = NuGraphCombinedDataset(self.test_dataset_source, self.test_dataset_target)
             
 
     @staticmethod
@@ -190,49 +194,72 @@ class NuGraphDataModule(LightningDataModule):
         batchB = Batch.from_data_list(dataB_list)  # Batch data from datasetB
         return batchA, batchB
     
-    def train_dataloader(self) -> DataLoader:      
+    def train_dataloader(self) -> DataLoader:    
+        shuffle = True
+        sampler = None
         if not self.target_filename:
            if self.shuffle == 'balance':
               shuffle = False
               sampler = BalanceSampler.BalanceSampler(
-                           datasize=self.train_datasize,
+                           datasize=self.train_datasize_source,
                            batch_size=self.batch_size,
                            balance_frac=self.balance_frac)
-           else:
-              shuffle = True
-              sampler = None
-            
-           dataloader_train = DataLoader(self.train_dataset,
+           dataloader_train = DataLoader(self.train_dataset_source,
                                 batch_size=self.batch_size,
                                 num_workers=self.num_workers,
                                 sampler=sampler, drop_last=True,
                                 shuffle=shuffle, pin_memory=True)
         else:
-            dataloader_train = DataLoader(self.combined_train,
-                                  batch_size=self.batch_size, drop_last=True, 
-                                  shuffle=True, collate_fn=self.collate_func, pin_memory=True) 
+           if self.shuffle == 'balance':
+              shuffle = False
+              sampler = BalanceSampler.BalanceSampler(
+                           datasize=self.paired_train_datasize(),
+                           batch_size=self.batch_size,
+                           balance_frac=self.balance_frac)
+           dataloader_train = DataLoader(self.combined_train,
+                                batch_size=self.batch_size,
+                                num_workers=self.num_workers,
+                                sampler=sampler, drop_last=True,
+                                shuffle=shuffle, collate_fn=self.collate_func, pin_memory=True)             
         return dataloader_train
     
     
     def val_dataloader(self) -> DataLoader:
         if not self.target_filename:
-           dataloader_val = DataLoader(self.val_dataset, num_workers=self.num_workers,
-                                    batch_size=self.batch_size)
+           dataloader_val = DataLoader(self.val_dataset_source, num_workers=self.num_workers,
+                                batch_size=self.batch_size)
         else:    
-           dataloader_val = DataLoader(self.combined_val,
-                                   batch_size=self.batch_size, collate_fn=self.collate_func,)   
+           dataloader_val = DataLoader(self.combined_val, num_workers=self.num_workers,
+                                batch_size=self.batch_size, collate_fn=self.collate_func,)   
         return dataloader_val    
 
     
     def test_dataloader(self) -> DataLoader:
         if not self.target_filename:
-           dataloader_test = DataLoader(self.test_dataset, num_workers=self.num_workers,
+           dataloader_test = DataLoader(self.test_dataset_source, num_workers=self.num_workers,
                                  batch_size=self.batch_size)
         else:
-           dataloader_test = DataLoader(self.combined_test,
-                                  batch_size=self.batch_size, collate_fn=self.collate_func,)
+           dataloader_test = DataLoader(self.combined_test, num_workers=self.num_workers,
+                                 batch_size=self.batch_size, collate_fn=self.collate_func,)
         return dataloader_test
             
+
+    def paired_train_datasize(self):
+        """
+        Size of each (source, target) training pair, for the balance sampler.
+
+        NuGraphCombinedDataset pairs source graph i with target graph i and
+        stops at the shorter dataset, so pair i costs the two graphs' sizes
+        together.
+        """
+        n = len(self.combined_train)
+        source = self.train_datasize_source[:n]
+        target = self.train_datasize_target[:n]
+        if len(source) < n or len(target) < n:
+            raise RuntimeError("datasize/train is shorter than the train split in the source "
+                               "or target file; rerun generate_samples on that file.")
+        return source + target     
+
     
     @staticmethod
     def add_data_args(parser: ArgumentParser) -> ArgumentParser:

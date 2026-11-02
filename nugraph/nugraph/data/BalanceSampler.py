@@ -37,6 +37,7 @@ class BalanceSampler(Sampler):
         bins = [ [] for i in range(num_batches) ]
 
         # Distribute the n-largest sample indices to each bin
+        idx = -1 #so the offset is below 0 when there are no outliers
         for i, sample_index in enumerate(n_largest_indices):
             idx = i % num_batches
             bins[idx].append(sample_index)
