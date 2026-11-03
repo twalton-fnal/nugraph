@@ -40,6 +40,7 @@ class SemanticDecoder(nn.Module):
                  hit_features: int,
                  semantic_classes: list[str],
                  da_loss_fnc_name: str = None,
+                 drop_target_label: bool = False,
                  warmup_epochs: int = 0):
         super().__init__()
      
@@ -47,6 +48,7 @@ class SemanticDecoder(nn.Module):
         self.warmup_epochs = warmup_epochs
         self.use_da_after_warmups = False
         self.da_loss_fnc_name = da_loss_fnc_name
+        self.drop_target_label = drop_target_label
         self.use_domain_adaptation = False 
         self.domain_adaptation_classes = [ "off", "dann", "mmd", "semantic", "sinkhorn" ]
         
@@ -100,13 +102,12 @@ class SemanticDecoder(nn.Module):
         # Domain classifier network for DANN
         if self.da_loss_fnc_name == "dann":  
            self.domain_net = nn.Sequential(
-                                  nn.Linear(in_features=5,out_features=64),
+                                  nn.Linear(in_features=hit_features,out_features=64),
                                   nn.ReLU(),
                                   nn.Linear(in_features=64,out_features=2)
            )  
            self.domain_classes = ['source', 'target']
-
-        
+    
 
     
     def forward(self, data: Data | list[Data], stage: str = None) -> dict[str, Any]:
@@ -177,24 +178,26 @@ class SemanticDecoder(nn.Module):
               combined_image = torch.cat((xSS, xTT), dim=0)  
               combined_label = torch.cat((ySS, yTT), dim=0)
 
-              loss_func = self.loss_dann(combined_image, combined_label)
+              loss_func  = self.loss_dann(combined_image, combined_label)
               raw_lossDA = wDA * loss_func + self.da_temp
 
            elif self.da_loss_fnc_name == "mmd":
-                raw_lossDA = wDA * self.loss_mmd(source_data["hit"].x, target_data["hit"].x) + self.da_temp
+                loss_func  = self.loss_mmd(source_data["hit"].x, target_data["hit"].x)
+                raw_lossDA = wDA * loss_func + self.da_temp
            elif self.da_loss_fnc_name == "semantic":
-                raw_lossDA = self.loss_semantic(source_data["hit"].x, y_source, target_data["hit"].x, y_target) 
+                loss_func  = self.loss_semantic(source_data["hit"].x, y_source, target_data["hit"].x, y_target)  
+                raw_lossDA = wDA * loss_func + self.da_temp 
            elif self.da_loss_fnc_name == "sinkhorn":
                 pairwise_distances = torch.cdist(source_data["hit"].x, target_data["hit"].x, p=2)
                 flattened_distances = pairwise_distances.view(-1)
                 max_distance = torch.max(flattened_distances)
                 dynamic_blur_val = 0.05 * max_distance.detach().cpu().numpy()
-                raw_lossDA = wDA * self.loss_sinkhorn(source_data["hit"].x, 
-                                                      target_data["hit"].x, blur=max(dynamic_blur_val, 0.01)) + self.da_temp 
+                loss_func  = self.loss_sinkhorn(source_data["hit"].x, target_data["hit"].x, blur=max(dynamic_blur_val, 0.01)) 
+                raw_lossDA = wDA * loss_func + self.da_temp 
            else:
-              sys.exit( f"The function {self.da_loss_fnc_name} does not exist." )
+              raise ValueError(f"Unknown domain adaptation loss \"{self.da_loss_fnc_name}\"")
+              
    
-
            """  
            Smooth capping of the DA based on the source semantic loss value 
            (currently to be at most 1/4 of the event loss value)
@@ -212,7 +215,11 @@ class SemanticDecoder(nn.Module):
            lossDA = raw_lossDA
    
         # total loss
-        loss = loss_source + loss_target + lossDA
+        if self.drop_target_label:
+           loss = loss_source + lossDA
+        else:
+           loss = loss_source + loss_target + lossDA
+
             
         # calculate metrics
         metrics = {}
