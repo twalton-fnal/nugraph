@@ -1,6 +1,6 @@
 """NuGraph dataset"""
 from typing import Callable, Optional
-import h5py
+import os, h5py
 from torch_geometric.data import Dataset
 from pynuml.data import NuGraphData
 
