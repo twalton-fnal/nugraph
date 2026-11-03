@@ -10,6 +10,7 @@ from .scriptutils import setup_env, configure_device
 from .input_norm import InputNorm
 
 """Domain Adaptation related updates"""
+from .da_weight import DAWeight, DA_WEIGHT_MODES, dann_ramp
 from .DANNLoss import ReverseLayerF
 from .MMDLoss import MMDLoss
 from .SemanticLoss import SemanticAlignmentLoss
