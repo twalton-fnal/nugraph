@@ -9,20 +9,20 @@ running it with no options does what the notebook does.
 
 Examples
     # the notebook as committed: MicroBooNE -> ICARUS, DANN, 10 epochs, warmup 2
-    python train.py
+    python train_da.py
 
     # MMD for 30 epochs with the DANN-style ramp on the DA weight
-    python train.py --da-loss mmd --epochs 30 --da-weight-mode schedule
+    python train_da.py --da-loss mmd --epochs 30 --da-weight-mode schedule
 
     # paired source/target training without a DA loss (needs the "off" fix)
-    python train.py --da-loss off
+    python train_da.py --da-loss off
 
     # nominal NuGraph3 on one file
-    python train.py --input-files 1 --source /path/to/icarus-numi-1d.gnn.h5 \\
+    python train_da.py --input-files 1 --source /path/to/icarus-numi-1d.gnn.h5 \\
         --dataset-name Nugraph-Icarus-Event-Decoder-Test
 
     # print the resolved configuration and stop
-    python train.py --dry-run
+    python train_da.py --dry-run
 """
 
 import argparse
