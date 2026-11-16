@@ -20,15 +20,30 @@ class MMDLoss(torch.nn.Module):
         """
     def __init__(self):
         super().__init__()
-        self.sigmas = torch.Tensor([
-            1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1, 5,
-            10, 15, 20, 25, 30, 35, 100, 1e3, 1e4, 1e5, 1e6
-        ]).float().cuda()
 
+        # Registered as a buffer so it follows the module across devices
+        # (model.to(...), Lightning's device placement) instead of being pinned
+        # to CUDA at construction time. persistent=False keeps it out of the
+        # state_dict, so checkpoints saved before this change still load.
+        self.register_buffer(
+            "sigmas",
+            torch.tensor([
+                1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1, 5,
+                10, 15, 20, 25, 30, 35, 100, 1e3, 1e4, 1e5, 1e6
+            ], dtype=torch.float32),
+            persistent=False,
+        )
+
+    
     def forward(self, hs: Tensor, ht: Tensor) -> Tensor:
-        gaussian_kernel = partial(self._gaussian_kernel_matrix, sigmas=self.sigmas)
-        loss_value = self._maximum_mean_discrepancy(hs, ht, kernel=gaussian_kernel)
+        # compute in float32: the smallest sigmas give kernel widths (~5e5)
+        # that overflow float16 under mixed precision
+        with torch.autocast(device_type=hs.device.type, enabled=False):
+            hs, ht = hs.float(), ht.float()
+            gaussian_kernel = partial(self._gaussian_kernel_matrix, sigmas=self.sigmas)
+            loss_value = self._maximum_mean_discrepancy(hs, ht, kernel=gaussian_kernel)
         return torch.clamp(loss_value, min=1e-4)
+
 
     @staticmethod
     def _compute_pairwise_distances(x: Tensor, y: Tensor) -> Tensor:

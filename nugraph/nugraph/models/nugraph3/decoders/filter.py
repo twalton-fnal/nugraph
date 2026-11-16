@@ -15,6 +15,7 @@ from ....util.DANNLoss import ReverseLayerF
 from ....util.MMDLoss import MMDLoss
 from ....util.SemanticLoss import SemanticAlignmentLoss
 from ....util.SinkhornLoss import Sinkhorn
+from ....util.da_weight import DAWeight
 from ....util.EmbeddingPlotter import CombinedEmbeddingPlot
 
 from ..types import Data
@@ -33,12 +34,18 @@ class FilterDecoder(nn.Module):
     def __init__(self,
                  hit_features: int,
                  da_loss_fnc_name: str = None,
+                 da_weight_mode: str = "learned",
+                 da_weight: float = 1.0,
+                 da_gamma: float = 10.0,
+                 drop_target_label: bool = False,
                  warmup_epochs: int = 0):
         super().__init__()
 
         self.warmup_epochs = warmup_epochs
         self.use_da_after_warmups = False
         self.da_loss_fnc_name = da_loss_fnc_name
+        self.da_weighting = DAWeight(da_weight_mode, da_weight, da_gamma) 
+        self.drop_target_label = drop_target_label
         self.use_domain_adaptation = False 
         self.domain_adaptation_classes = [ "off", "dann", "mmd", "semantic", "sinkhorn" ]
    
@@ -52,7 +59,7 @@ class FilterDecoder(nn.Module):
         self.source_temp = nn.Parameter(torch.tensor(0.))
         if self.da_loss_fnc_name in self.domain_adaptation_classes: 
            self.target_temp = nn.Parameter(torch.tensor(0.))
-           self.da_temp = nn.Parameter(torch.tensor(0.))
+           self.da_temp = nn.Parameter(torch.tensor(0.),requires_grad=self.da_weighting.learned)
        
         # metrics
         self.classes = [ "noise", "signal" ] 
@@ -134,12 +141,12 @@ class FilterDecoder(nn.Module):
            x_target = target_data["hit"].x_filter.squeeze(dim=-1)
            w_target = 2 * (-1 * self.target_temp).exp()
            loss_target = w_target * self.loss(x_target, y_target) + self.target_temp
-            
+
+        # calculate the DA loss
         if paired and self.use_domain_adaptation:
-           wDA = 2 * (-1 * self.da_temp).exp()
             
-           if self.da_loss_fnc_name == "dann":    
-              alpha = 1
+           if self.da_loss_fnc_name == "dann":   
+              alpha = self.da_weighting.grl_alpha
                
               reversed_S = ReverseLayerF.apply(source_data["hit"].x, alpha)
               xSS = self.domain_net(reversed_S)
@@ -153,15 +160,19 @@ class FilterDecoder(nn.Module):
               combined_label = torch.cat((ySS, yTT), dim=0)
 
               loss_func = self.loss_dann(combined_image, combined_label)
-              raw_lossDA = wDA * loss_func + self.da_temp
+              raw_lossDA = self.da_weighting(loss_func, self.da_temp, adversarial=True)
 
            else:
-              sys.exit( f"The function {self.da_loss_fnc_name} does not exist." )
-
+              raise ValueError(f"Unknown domain adaptation loss \"{self.da_loss_fnc_name}\"")
+    
            lossDA = raw_lossDA
    
         # total loss
-        loss = loss_source + loss_target + lossDA
+        if self.drop_target_label:
+           loss = loss_source + lossDA
+        else:
+           loss = loss_source + loss_target + lossDA
+
             
         # calculate metrics
         metrics = {}
@@ -185,7 +196,10 @@ class FilterDecoder(nn.Module):
            metrics[f"filter/{name}"] = self.source_temp
            if paired:             
               metrics["filter/temp_target"] = self.target_temp
-              metrics[f"filter/temp_da_{self.da_loss_fnc_name}"] = self.da_temp
+              if self.da_weighting.learned:
+                 metrics[f"event/temp_da_{self.da_loss_fnc_name}"] = self.da_temp
+              else:
+                 metrics[f"event/da_weight_{self.da_loss_fnc_name}"] = self.da_weighting.value
                 
         if stage in ["val", "test"]:
            self.source_cm_recall.update(x_source, y_source)

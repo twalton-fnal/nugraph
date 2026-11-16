@@ -55,7 +55,7 @@ class Encoder(torch.nn.Module):
             data: Heterogeneous Nugraph object.
             mode: Select which InputNorm instance to use (source, target).
         """
-        
+   
         x_in = self.input_norms[mode](data["hit"].x)
         
         data["hit"].x = self.planar_net(x_in)
@@ -76,10 +76,10 @@ class Encoder(torch.nn.Module):
         
         Args:
             data: Graph data object
-        """
+        """     
         
         if isinstance(data, (list, tuple)):
-           for i, d in enumerate(data):
+           for i, d in enumerate(data):          
                mode = "source" if i == 0 else "target"
                self.apply_normalizations(d, mode=mode)
         else:

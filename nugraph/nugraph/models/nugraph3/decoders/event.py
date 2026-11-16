@@ -16,6 +16,7 @@ from ....util.SinkhornLoss import Sinkhorn
 from ....util.SemanticLoss import SemanticAlignmentLoss
 from ....util.MMDLoss import MMDLoss
 from ....util.DANNLoss import ReverseLayerF
+from ....util.da_weight import DAWeight
 from ....util.EmbeddingPlotter import CombinedEmbeddingPlot
 
 
@@ -30,6 +31,8 @@ class EventDecoder(nn.Module):
     - Semantic loss (semantic)
     - Sinkhorn loss (sinkhorn)
 
+    The da_weighting determines how strongly the DA term enters the loss
+
     Convolve the interaction node embedding down to a set of categorical scores
     for each event class.
 
@@ -41,12 +44,18 @@ class EventDecoder(nn.Module):
                  interaction_features: int,
                  event_classes: list[str],
                  da_loss_fnc_name: str = None,
+                 da_weight_mode: str = "learned",
+                 da_weight: float = 1.0,
+                 da_gamma: float = 10.0,
+                 drop_target_label: bool = False,
                  warmup_epochs: int = 0):
         super().__init__()
 
         self.warmup_epochs = warmup_epochs
         self.use_da_after_warmups = True
         self.da_loss_fnc_name = da_loss_fnc_name
+        self.da_weighting = DAWeight(da_weight_mode, da_weight, da_gamma)
+        self.drop_target_label = drop_target_label
         self.use_domain_adaptation = False 
         self.domain_adaptation_classes = [ "off", "dann", "mmd", "semantic", "sinkhorn" ]
         
@@ -70,7 +79,7 @@ class EventDecoder(nn.Module):
         self.source_temp = nn.Parameter(torch.tensor(0.))
         if self.da_loss_fnc_name in self.domain_adaptation_classes: 
            self.target_temp = nn.Parameter(torch.tensor(0.))
-           self.da_temp = nn.Parameter(torch.tensor(0.))
+           self.da_temp = nn.Parameter(torch.tensor(0.),requires_grad=self.da_weighting.learned)
 
         # metrics
         metric_args = {
@@ -118,7 +127,7 @@ class EventDecoder(nn.Module):
         paired = isinstance(data, (list, tuple))
         if not paired:
             source_data = data
-         else:
+        else:
             source_data, target_data = data 
 
         # initialize the loss variables
@@ -136,18 +145,12 @@ class EventDecoder(nn.Module):
            w_target = 2 * (-1 * self.target_temp).exp() 
            loss_target = w_target * self.loss(x_target, y_target) + self.target_temp           
 
-        """
-           Domain Adaptation is implemented via the Domain-Adversarial Neural Network (DANN). 
-           Both source and target labels are used to calculate event losses (loss_source and loss_target).
-           All losses are scaled by their own temperatures, which are trainable parameters.
-           DA loss is also capped at most 1/4 of the loss_source (to be on the safe side). 
-        """ 
+        # calculate the DA loss
         if paired and self.use_domain_adaptation:  
-           wDA = 2 * (-1 * self.da_temp).exp()
             
            if self.da_loss_fnc_name == "dann":  
-              alpha = 1   # Weight of DA is handeled by weight wDA so alpha=1 inside of the gradient reversal layer
-              
+              alpha = self.da_weighting.grl_alpha # lambda scales only the reversed gradient into the features (canonical DANN)
+               
               reversed_S = ReverseLayerF.apply(source_data["evt"].x, alpha)
               xSS = self.domain_net(reversed_S)
               ySS = torch.zeros(xSS.shape[0], dtype=torch.long, device=xSS.device)  
@@ -160,8 +163,7 @@ class EventDecoder(nn.Module):
               combined_label = torch.cat((ySS, yTT), dim=0)
                
               loss_func = self.loss_dann(combined_image, combined_label)
-              raw_lossDA = wDA * loss_func + self.da_temp 
-              
+              raw_lossDA = self.da_weighting(loss_func, self.da_temp, adversarial=True)            
            elif self.da_loss_fnc_name == "sinkhorn":
               pairwise_distances = torch.cdist(source_data["evt"].x, target_data["evt"].x, p=2)
               flattened_distances = pairwise_distances.view(-1)
@@ -169,36 +171,25 @@ class EventDecoder(nn.Module):
               dynamic_blur_val = 0.05 * max_distance.detach().cpu().numpy()
 
               loss_func = self.loss_sinkhorn(source_data["evt"].x, target_data["evt"].x, blur=max(dynamic_blur_val, 0.01))
-              raw_lossDA = wDA * loss_func + self.da_temp
+              raw_lossDA = self.da_weighting(loss_func, self.da_temp, adversarial=False)
            elif self.da_loss_fnc_name == "mmd":
               loss_func = self.loss_mmd(source_data["evt"].x, target_data["evt"].x) 
-              raw_lossDA = wDA * loss_func + self.da_temp 
+              raw_lossDA = self.da_weighting(loss_func, self.da_temp, adversarial=False) 
            elif self.da_loss_fnc_name == "semantic":
               loss_func =  self.loss_semantic(source_data["evt"].x, y_source, target_data["evt"].x, y_target)
-              raw_lossDA = wDA * loss_func + self.da_temp 
+              raw_lossDA = self.da_weighting(loss_func, self.da_temp, adversarial=False)
            else:
-              sys.exit( f"The function {self.da_loss_fnc_name} does not exist." )
-               
-           """
-             Smooth capping of the DA based on the source event loss value 
-             (currently to be at most 1/4 of the event loss value)
-             The "sharp" variable is the sharpness of the transition when the 
-             source event loss goes from positive to negative
-        
-             Use the temperature scaling to calculate the DA loss 
-             Therefore, turn off the capping method for the DA loss
-           """  
-           """  
-           sharp = 20.0  
-           sig = torch.sigmoid(sharp * loss_source)
-           max_lossDA = sig * (loss_source / 4) + (1 - sig) * (4 * loss_source)
-           lossDA = torch.min(raw_lossDA, max_lossDA)
-           """
+              raise ValueError(f"Unknown domain adaptation loss \"{self.da_loss_fnc_name}\"")
+  
            lossDA = raw_lossDA
             
         # total loss
-        loss = loss_source + loss_target + lossDA
+        if self.drop_target_label:
+           loss = loss_source + lossDA
+        else:
+           loss = loss_source + loss_target + lossDA
 
+        
         # calculate metrics
         metrics = {}
         
@@ -221,7 +212,10 @@ class EventDecoder(nn.Module):
            metrics[f"event/{name}"] = self.source_temp
            if paired:             
               metrics["event/temp_target"] = self.target_temp
-              metrics[f"event/temp_da_{self.da_loss_fnc_name}"] = self.da_temp
+              if self.da_weighting.learned:
+                 metrics[f"event/temp_da_{self.da_loss_fnc_name}"] = self.da_temp
+              else:
+                 metrics[f"event/da_weight_{self.da_loss_fnc_name}"] = self.da_weighting.value
             
         if stage in ["val", "test"]:
             self.source_cm_recall.update(x_source, y_source)

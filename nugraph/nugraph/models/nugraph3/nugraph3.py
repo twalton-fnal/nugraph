@@ -50,6 +50,12 @@ class NuGraph3(LightningModule):
         lr: Learning rate
         da_loss_fnc_name: Name of the domain adaptation loss function
                           (dann, mmd, semantic, sinkhorn)
+        da_weight_mode: How the DA loss is weighted: "schedule" (DANN ramp from 0
+                        to da_weight after warmup), "fixed" (constant da_weight), or
+                        "learned" (original trainable temperature, for ablation)
+        da_weight: Final (schedule) or constant (fixed) DA weight
+        da_gamma: Steepness of the DANN ramp in schedule mode                          
+        drop_target_label: Exclude the target data in the loss function
         warmup_epochs: Enable a warmup period for increasing the learning rate
     """
     def __init__(self,
@@ -71,6 +77,10 @@ class NuGraph3(LightningModule):
                  use_checkpointing: bool = False,
                  lr: float = 0.001,
                  da_loss_fnc_name: str = None,
+                 da_weight_mode: str = "learned",
+                 da_weight: float = 1.0,
+                 da_gamma: float = 10.0,                 
+                 drop_target_label: bool = False,
                  warmup_epochs: int = 0):
         super().__init__()
 
@@ -85,11 +95,18 @@ class NuGraph3(LightningModule):
         self.event_classes = event_classes
         self.num_iters = num_iters
         self.lr = lr
+        self.drop_target_label = drop_target_label
         self.warmup_epochs = warmup_epochs
         
         self.da_loss_fnc_name = da_loss_fnc_name
-        self.domain_adaptation_classes = [ "dann", "mmd", "semantic", "sinkhorn" ]
+        self.domain_adaptation_classes = [ "off", "dann", "mmd", "semantic", "sinkhorn" ]
 
+        da_weight_args = { 
+                           "da_weight_mode": da_weight_mode,
+                           "da_weight": da_weight,
+                           "da_gamma": da_gamma
+                         }
+        
         # encoder 
         self.encoder = Encoder(in_features, hit_features, nexus_features, interaction_features, 
                                instance_features=instance_features)
@@ -104,22 +121,22 @@ class NuGraph3(LightningModule):
         
         if event_head:
             self.event_decoder = EventDecoder(interaction_features, event_classes, 
-                                              da_loss_fnc_name=self.da_loss_fnc_name, 
-                                              warmup_epochs=self.warmup_epochs)
+                                              da_loss_fnc_name=self.da_loss_fnc_name, **da_weight_args, 
+                                              drop_target_label=self.drop_target_label, warmup_epochs=self.warmup_epochs)
             self.event_decoder.use_da_after_warmups = True
             self.decoders.append(self.event_decoder)
 
         if semantic_head:
             self.semantic_decoder = SemanticDecoder(hit_features, semantic_classes, 
-                                                    da_loss_fnc_name=self.da_loss_fnc_name, 
-                                                    warmup_epochs=self.warmup_epochs)
+                                                    da_loss_fnc_name=self.da_loss_fnc_name, **da_weight_args,
+                                                    drop_target_label=self.drop_target_label, warmup_epochs=self.warmup_epochs)
             self.semantic_decoder.use_da_after_warmups = False
             self.decoders.append(self.semantic_decoder)
 
         if filter_head:
             self.filter_decoder = FilterDecoder(hit_features,
-                                                da_loss_fnc_name=self.da_loss_fnc_name,
-                                                warmup_epochs=self.warmup_epochs)
+                                                da_loss_fnc_name=self.da_loss_fnc_name, **da_weight_args,
+                                                drop_target_label=self.drop_target_label, warmup_epochs=self.warmup_epochs)
             self.filter_decoder.use_da_after_warmups = False
             self.decoders.append(self.filter_decoder)
 
@@ -214,7 +231,38 @@ class NuGraph3(LightningModule):
 
         return total_loss, total_metrics 
 
+
+    def da_progress(self, batch_idx: int) -> float:
+        """
+        Fraction of the DA phase completed, in [0, 1]: 0 when DA switches on
+        after the warmup epochs, 1 at the final training epoch. Drives the
+        DANN ramp in schedule mode.
+
+        Args:
+            batch_idx: Index of the current training batch within the epoch
+        """
+        trainer = self.trainer
+        num_batches = trainer.num_training_batches
+        if not num_batches or num_batches == float("inf"):
+            num_batches = batch_idx + 1
+        epoch = trainer.current_epoch + batch_idx / num_batches
+        start = self.warmup_epochs
+        end = trainer.max_epochs
+        if end is None or end < 0 or end <= start:
+           return 1.0
+        return min(max((epoch - start) / (end - start), 0.0), 1.0)
     
+
+    def on_train_batch_start(self, batch, batch_idx: int) -> None:
+        if self.da_loss_fnc_name not in self.domain_adaptation_classes:
+           return
+        progress = self.da_progress(batch_idx)
+        for decoder in self.decoders:
+            weighting = getattr(decoder, "da_weighting", None)
+            if weighting is not None:
+               weighting.progress = progress 
+
+
     def on_train_epoch_start(self) -> None:
         if self.da_loss_fnc_name == None:
            print("Enter training epoch")
@@ -225,9 +273,10 @@ class NuGraph3(LightningModule):
                                  "semantic_decoder": getattr(self, "semantic_decoder", None),
                                  "filter_decoder": getattr(self, "filter_decoder", None)
                                 }.items():
+        
                if decoder is None or not hasattr(decoder, "use_domain_adaptation"):
                   continue
-
+                
                if epoch < getattr(decoder, "warmup_epochs", 0):
                   print(f"[Epoch {epoch}] and the DA is OFF for {name} (warmup phase)")
                   continue
@@ -235,9 +284,9 @@ class NuGraph3(LightningModule):
                if not decoder.use_domain_adaptation:
                   if decoder.use_da_after_warmups:
                      print(f"[Epoch {epoch}] and Enabling DA for {name}") 
-                     decoder.use_domain_adaptation = True
-
+                     decoder.use_domain_adaptation = True    
             
+        
     def on_train_epoch_end(self) -> None:
         # stop updating running average for feature norm
         for norm in self.encoder.input_norms.values():
@@ -400,7 +449,17 @@ class NuGraph3(LightningModule):
         model.add_argument('--learning-rate', type=float, default=0.001,
                            help='Max learning rate during training')
         model.add_argument('--da-loss', type=str, choices=['dann', 'mmd', 'sinkhorn', 'semantic'], default=None,
-                           help='Select the DA loss function to use (options are: dann, mmd, sinkhorn, semantic)')   
+                           help='Select the DA loss function to use (options are: dann, mmd, sinkhorn, semantic)')
+        model.add_argument('--da-weight-mode', type=str, default='learned',
+                           choices=['schedule', 'fixed', 'learned'],
+                           help=('How to weight the DA loss: DANN ramp up to --da-weight, constant '
+                                 '--da-weight, or the original learned temperature (default: %(default)s)'))
+        model.add_argument('--da-weight', type=float, default=1.0,
+                           help='Final (schedule) or constant (fixed) DA loss weight (default: %(default)s)')
+        model.add_argument('--da-gamma', type=float, default=10.0,
+                           help='Steepness of the DANN ramp in schedule mode (default: %(default)s)')        
+        model.add_argument('--drop-label', action='store_true',
+                           help='Drop the target label in the domain adaptation training')
         model.add_argument('--warmup', type=int, default=0,
                            help='Include the warmup phase before the domain adaptation loss turns on. (default: %(default)s).')
         return parser
@@ -433,4 +492,8 @@ class NuGraph3(LightningModule):
             use_checkpointing=args.use_checkpointing,
             lr=args.learning_rate,
             da_loss=args.da_loss,
+            da_weight_mode=args.da_weight_mode,
+            da_weight=args.da_weight,
+            da_gamma=args.da_gamma,                        
+            drop_label=args.drop_label,
             warmup_epochs=args.warmup)

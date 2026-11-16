@@ -15,6 +15,7 @@ from ....util.DANNLoss import ReverseLayerF
 from ....util.MMDLoss import MMDLoss
 from ....util.SemanticLoss import SemanticAlignmentLoss
 from ....util.SinkhornLoss import Sinkhorn
+from ....util.da_weight import DAWeight
 from ....util.EmbeddingPlotter import CombinedEmbeddingPlot
 from ..types import Data
 
@@ -40,6 +41,9 @@ class SemanticDecoder(nn.Module):
                  hit_features: int,
                  semantic_classes: list[str],
                  da_loss_fnc_name: str = None,
+                 da_weight_mode: str = "learned",
+                 da_weight: float = 1.0,
+                 da_gamma: float = 10.0,                 
                  drop_target_label: bool = False,
                  warmup_epochs: int = 0):
         super().__init__()
@@ -48,6 +52,7 @@ class SemanticDecoder(nn.Module):
         self.warmup_epochs = warmup_epochs
         self.use_da_after_warmups = False
         self.da_loss_fnc_name = da_loss_fnc_name
+        self.da_weighting = DAWeight(da_weight_mode, da_weight, da_gamma)
         self.drop_target_label = drop_target_label
         self.use_domain_adaptation = False 
         self.domain_adaptation_classes = [ "off", "dann", "mmd", "semantic", "sinkhorn" ]
@@ -72,7 +77,7 @@ class SemanticDecoder(nn.Module):
         self.source_temp = nn.Parameter(torch.tensor(0.))
         if self.da_loss_fnc_name in self.domain_adaptation_classes: 
            self.target_temp = nn.Parameter(torch.tensor(0.))
-           self.da_temp = nn.Parameter(torch.tensor(0.))
+           self.da_temp = nn.Parameter(torch.tensor(0.),requires_grad=self.da_weighting.learned)
 
         # metrics
         self.classes = semantic_classes
@@ -154,18 +159,12 @@ class SemanticDecoder(nn.Module):
            w_target = 2 * (-1 * self.target_temp).exp()
            loss_target = w_target * self.loss(x_target, y_target) + self.target_temp
 
-        """
-            Domain Adaptation is optional and is implemented via DANN (lossDA). 
-            Both source and target labels are used to calculate 
-            semantic losses (loss_source and loss_target).
-            All losses are scaled by their own temperatures, which are trainable parameters.
-            DA loss is also capped at most 1/4 of the loss_source (to be on the safe side). 
-        """
+
+        # calculate the DA loss
         if paired and self.use_domain_adaptation:
-           wDA = 2 * (-1 * self.da_temp).exp()
             
            if self.da_loss_fnc_name == "dann":    
-              alpha = 1
+              alpha = self.da_weighting.grl_alpha # lambda scales only the reversed gradient into the features (canonical DANN)
                
               reversed_S = ReverseLayerF.apply(source_data["hit"].x, alpha)
               xSS = self.domain_net(reversed_S)
@@ -179,39 +178,24 @@ class SemanticDecoder(nn.Module):
               combined_label = torch.cat((ySS, yTT), dim=0)
 
               loss_func  = self.loss_dann(combined_image, combined_label)
-              raw_lossDA = wDA * loss_func + self.da_temp
-
+              raw_lossDA = self.da_weighting(loss_func, self.da_temp, adversarial=True) 
            elif self.da_loss_fnc_name == "mmd":
                 loss_func  = self.loss_mmd(source_data["hit"].x, target_data["hit"].x)
-                raw_lossDA = wDA * loss_func + self.da_temp
+                raw_lossDA = self.da_weighting(loss_func, self.da_temp, adversarial=False)
            elif self.da_loss_fnc_name == "semantic":
-                loss_func  = self.loss_semantic(source_data["hit"].x, y_source, target_data["hit"].x, y_target)  
-                raw_lossDA = wDA * loss_func + self.da_temp 
+                loss_func  = self.loss_semantic(source_data["hit"].x, y_source, target_data["hit"].x, y_target) 
+                raw_lossDA = self.da_weighting(loss_func, self.da_temp, adversarial=False)
            elif self.da_loss_fnc_name == "sinkhorn":
                 pairwise_distances = torch.cdist(source_data["hit"].x, target_data["hit"].x, p=2)
                 flattened_distances = pairwise_distances.view(-1)
                 max_distance = torch.max(flattened_distances)
                 dynamic_blur_val = 0.05 * max_distance.detach().cpu().numpy()
+               
                 loss_func  = self.loss_sinkhorn(source_data["hit"].x, target_data["hit"].x, blur=max(dynamic_blur_val, 0.01)) 
-                raw_lossDA = wDA * loss_func + self.da_temp 
+                raw_lossDA = self.da_weighting(loss_func, self.da_temp, adversarial=False)
            else:
               raise ValueError(f"Unknown domain adaptation loss \"{self.da_loss_fnc_name}\"")
               
-   
-           """  
-           Smooth capping of the DA based on the source semantic loss value 
-           (currently to be at most 1/4 of the event loss value)
-           sharpness of transition when source semantic loss goes from positive to negative
-           """  
-           """ 
-             Use the temperature scaling to calculate the DA loss 
-             Therefore, turn off the capping method for the DA loss
-             
-           sharp = 20.0  
-           sig = torch.sigmoid(sharp * loss_source)
-           max_lossDA = sig * (loss_source / 4) + (1 - sig) * (4 * loss_source)
-           lossDA = torch.min(raw_lossDA, max_lossDA)
-           """
            lossDA = raw_lossDA
    
         # total loss
@@ -243,7 +227,10 @@ class SemanticDecoder(nn.Module):
            metrics[f"semantic/{name}"] = self.source_temp  
            if paired:
               metrics["semantic/temp_target"] = self.target_temp
-              metrics[f"semantic/temp_da_{self.da_loss_fnc_name}"] = self.da_temp
+              if self.da_weighting.learned:
+                 metrics[f"event/temp_da_{self.da_loss_fnc_name}"] = self.da_temp
+              else:
+                 metrics[f"event/da_weight_{self.da_loss_fnc_name}"] = self.da_weighting.value
                 
         if stage in ["val", "test"]:
            self.source_cm_recall.update(x_source, y_source)
